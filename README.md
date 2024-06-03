@@ -16,7 +16,7 @@ It can help you investigate and mitigate performance problems and test failures 
 
 Run the script with the necessary parameters:
 ```shell
-DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_script_civisibility.sh
+DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visibility.sh
 ```
 
 The script parameters are
@@ -35,5 +35,5 @@ JAVA_TOOL_OPTIONS=-javaagent:./.datadog/dd-java-agent.jar
 
 If you want to set the variables printed by the script, use the following expression:
 ```shell
-export $(DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_script_civisibility.sh | xargs)
+export $(DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visibility.sh | xargs)
 ```
