@@ -1,6 +1,4 @@
-![logo](CIVislogo.png)
-
-# Datadog Test Visibility installation script
+# <img height="25" src="CIVislogo.png" /> Datadog Test Visibility installation script
 
 A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Visibility](https://docs.datadoghq.com/tests/).
 The variables are printed in the following format: variableName=variableValue
