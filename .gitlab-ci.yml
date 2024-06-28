@@ -14,7 +14,7 @@ deploy:
   rules:
     - when: manual
   script:
-    - $S3_CP_CMD ./install_test_visibility_v${SCRIPT_VERSION}.sh s3://dd-agent/scripts/install_test_visibility_v${SCRIPT_VERSION}.sh --grants read=uri=http://acs.amazonaws.com/groups/global/AllUsers full=id=3a6e02b08553fd157ae3fb918945dd1eaae5a1aa818940381ef07a430cf25732
+    - $S3_CP_CMD ./install_test_visibility.sh s3://dd-agent/scripts/install_test_visibility_v${SCRIPT_VERSION}.sh --grants read=uri=http://acs.amazonaws.com/groups/global/AllUsers full=id=3a6e02b08553fd157ae3fb918945dd1eaae5a1aa818940381ef07a430cf25732
   after_script:
     # invalidate the install.datadoghq.com CF distribution
     - export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
