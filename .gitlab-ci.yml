@@ -5,7 +5,6 @@ variables:
   AWS_MAX_ATTEMPTS: 5 # retry AWS operations 5 times if they fail on network errors
   DATADOG_AGENT_BUILDERS: v9930706-ef9d493
   S3_CP_CMD: aws s3 cp --only-show-errors --region us-east-1 --sse AES256
-  SCRIPT: install_test_visibility.sh
   SCRIPT_VERSION: 1
 
 deploy:
@@ -15,7 +14,7 @@ deploy:
   rules:
     - when: manual
   script:
-    - $S3_CP_CMD ./${SCRIPT} s3://dd-agent/scripts/${SCRIPT}_v${SCRIPT_VERSION} --grants read=uri=http://acs.amazonaws.com/groups/global/AllUsers full=id=3a6e02b08553fd157ae3fb918945dd1eaae5a1aa818940381ef07a430cf25732
+    - $S3_CP_CMD ./${SCRIPT} s3://dd-agent/scripts/install_test_visibility_v${SCRIPT_VERSION}.sh --grants read=uri=http://acs.amazonaws.com/groups/global/AllUsers full=id=3a6e02b08553fd157ae3fb918945dd1eaae5a1aa818940381ef07a430cf25732
   after_script:
     # invalidate the install.datadoghq.com CF distribution
     - export $(printf "AWS_ACCESS_KEY_ID=%s AWS_SECRET_ACCESS_KEY=%s AWS_SESSION_TOKEN=%s"
@@ -27,4 +26,4 @@ deploy:
       --output text
       )
       )
-    - aws --region "us-east-1" cloudfront create-invalidation --distribution-id "E2VSER0FO39KRV" --paths "/scripts/${SCRIPT}_v${SCRIPT_VERSION}"
+    - aws --region "us-east-1" cloudfront create-invalidation --distribution-id "E2VSER0FO39KRV" --paths "/scripts/install_test_visibility_v${SCRIPT_VERSION}.sh"
