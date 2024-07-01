@@ -30,6 +30,7 @@ install_java_tracer() {
   local updated_java_tool_options="-javaagent:$filepath $JAVA_TOOL_OPTIONS"
   if [ ${#updated_java_tool_options} -le 1024 ]; then
     echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
+    echo "DD_TRACER_VERSION_JAVA=$(java -jar $filepath)"
   else
     >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
     return 1
@@ -69,6 +70,8 @@ install_js_tracer() {
   else
     echo "DD_TRACE_PACKAGE=$dd_trace_path"
   fi
+
+  echo "DD_TRACER_VERSION_JS=$(npm info dd-trace version)"
 }
 
 is_node_version_compliant() {
@@ -114,6 +117,8 @@ install_python_tracer() {
   echo "PYTHONPATH=$dd_trace_path:$coverage_path:$PYTHONPATH"
   echo "PYTEST_ADDOPTS=--ddtrace $PYTEST_ADDOPTS"
 
+  echo "DD_TRACER_VERSION_PYTHON=$(pip show ddtrace | grep Version | cut -d ' ' -f2)"
+
   deactivate >&2
 }
 
@@ -136,6 +141,8 @@ install_dotnet_tracer() {
   # Using "jenkins" for now, as it outputs the env vars in a provider-agnostic format.
   # Grepping to filter out lines that are not environment variables
   DD_CIVISIBILITY_AGENTLESS_ENABLED=true $ARTIFACTS_FOLDER/dd-trace ci configure jenkins | grep '='
+
+  echo "DD_TRACER_VERSION_DOTNET=$(dotnet tool list --tool-path $ARTIFACTS_FOLDER | grep dd-trace | awk '{print $2}')"
 }
 
 # set common environment variables
