@@ -30,7 +30,7 @@ install_java_tracer() {
   local updated_java_tool_options="-javaagent:$filepath $JAVA_TOOL_OPTIONS"
   if [ ${#updated_java_tool_options} -le 1024 ]; then
     echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
-    echo "DD_TRACER_VERSION_JAVA=$(java -jar $filepath)"
+    echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath || unzip -p $filepath META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
   else
     >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
     return 1
