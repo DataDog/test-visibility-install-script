@@ -8,6 +8,8 @@
 
 # The variables are printed in the following format: variableName=variableValue
 
+set -e
+
 ARTIFACTS_FOLDER="${DD_TRACER_FOLDER:-$(pwd)/.datadog}"
 if ! mkdir -p $ARTIFACTS_FOLDER; then
   >&2 echo "Error: Cannot create folder: $ARTIFACTS_FOLDER"
