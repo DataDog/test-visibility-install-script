@@ -8,6 +8,8 @@
 
 # The variables are printed in the following format: variableName=variableValue
 
+set -e
+
 ARTIFACTS_FOLDER="${DD_TRACER_FOLDER:-$(pwd)/.datadog}"
 if ! mkdir -p $ARTIFACTS_FOLDER; then
   >&2 echo "Error: Cannot create folder: $ARTIFACTS_FOLDER"
@@ -15,7 +17,12 @@ if ! mkdir -p $ARTIFACTS_FOLDER; then
 fi
 
 install_java_tracer() {
-  local url="https://dtdg.co/latest-java-tracer"
+  local url
+  if [ -n "$DD_SET_TRACER_VERSION_JAVA" ]; then
+    url="https://github.com/DataDog/dd-trace-java/releases/download/v$DD_SET_TRACER_VERSION_JAVA/dd-java-agent.jar"
+  else
+    url="https://dtdg.co/latest-java-tracer"
+  fi
   local filepath="$ARTIFACTS_FOLDER/dd-java-agent.jar"
 
   if command -v curl >/dev/null 2>&1; then
@@ -58,7 +65,7 @@ install_js_tracer() {
 
   # install dd-trace as a "global" package
   # (otherwise, doing SCM checkout might rollback the changes to package.json, and any subsequent `npm install` calls will result in removing the package)
-  if ! npm install -g dd-trace >&2; then
+  if ! npm install -g dd-trace${DD_SET_TRACER_VERSION_JS:+@$DD_SET_TRACER_VERSION_JS} >&2; then
     >&2 echo "Error: Could not install dd-trace for JS"
     return 1
   fi
@@ -71,7 +78,7 @@ install_js_tracer() {
     echo "DD_TRACE_PACKAGE=$dd_trace_path"
   fi
 
-  echo "DD_TRACER_VERSION_JS=$(npm info dd-trace version)"
+  echo "DD_TRACER_VERSION_JS=$(npm list -g dd-trace | grep dd-trace | awk -F@ '{print $2}')"
 }
 
 is_node_version_compliant() {
@@ -97,7 +104,7 @@ install_python_tracer() {
   python -m venv .dd_civis_env >&2
   source .dd_civis_env/bin/activate >&2
 
-  if ! pip install -U ddtrace coverage >&2; then
+  if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} coverage >&2; then
     >&2 echo "Error: Could not install ddtrace for Python"
     return 1
   fi
@@ -128,7 +135,7 @@ install_dotnet_tracer() {
     return 1
   fi
 
-  if ! dotnet tool update --tool-path $ARTIFACTS_FOLDER dd-trace >&2; then
+  if ! dotnet tool update --tool-path $ARTIFACTS_FOLDER dd-trace ${DD_SET_TRACER_VERSION_DOTNET:+--version $DD_SET_TRACER_VERSION_DOTNET} >&2; then
     >&2 echo "Error: Could not install dd-trace for .NET"
     return 1
   fi
