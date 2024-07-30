@@ -71,12 +71,17 @@ install_js_tracer() {
   fi
 
   # Github Actions prohibit setting NODE_OPTIONS
-  local dd_trace_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/ci/init"
+  local dd_trace_ci_init_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/ci/init"
+  local dd_trace_register_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/register.js"
   if ! is_github_actions; then
-    echo "NODE_OPTIONS=$NODE_OPTIONS -r $dd_trace_path"
+    echo "NODE_OPTIONS=$NODE_OPTIONS -r $dd_trace_ci_init_path"
   else
-    echo "DD_TRACE_PACKAGE=$dd_trace_path"
+    echo "DD_TRACE_PACKAGE=$dd_trace_ci_init_path"
   fi
+  # We can't set the --import flag directly in NODE_OPTIONS since it's only compatible from Node.js>=20.6.0 and Node.js>=18.19,
+  # not even if !is_github_actions. 
+  # Additionally, it's not useful for test frameworks other than vitest, which is ESM first. 
+  echo "DD_TRACE_ESM_IMPORT=$dd_trace_register_path"
 
   echo "DD_TRACER_VERSION_JS=$(npm list -g dd-trace | grep dd-trace | awk -F@ '{print $2}')"
 }
