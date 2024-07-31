@@ -17,29 +17,62 @@ if ! mkdir -p $ARTIFACTS_FOLDER; then
 fi
 
 install_java_tracer() {
-  local url
-  if [ -n "$DD_SET_TRACER_VERSION_JAVA" ]; then
-    url="https://github.com/DataDog/dd-trace-java/releases/download/v$DD_SET_TRACER_VERSION_JAVA/dd-java-agent.jar"
-  else
-    url="https://dtdg.co/latest-java-tracer"
+  if [ -z "$DD_SET_TRACER_VERSION_JAVA" ]; then
+      DD_SET_TRACER_VERSION_JAVA=$(get_latest_java_tracer_version)
   fi
-  local filepath="$ARTIFACTS_FOLDER/dd-java-agent.jar"
 
+  local filepath_tracer
+  filepath_tracer="$ARTIFACTS_FOLDER/dd-java-agent.jar"
+  local filepath_checksum
+  filepath_checksum="$ARTIFACTS_FOLDER/dd-java-agent.jar.sha256"
+
+  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar" $filepath_tracer
+  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar.sha256" $filepath_checksum
+
+  if ! echo "$(cat $filepath_checksum) $filepath_tracer" | sha256sum --quiet -c - ; then
+    return 1
+  fi
+
+  local updated_java_tool_options="-javaagent:$filepath_tracer $JAVA_TOOL_OPTIONS"
+  if [ ${#updated_java_tool_options} -le 1024 ]; then
+    echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
+    echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
+  else
+    >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
+    return 1
+  fi
+}
+
+get_latest_java_tracer_version() {
+  local filepath_metadata
+  filepath_metadata="$ARTIFACTS_FOLDER/maven-metadata.xml"
+  local filepath_checksum
+  filepath_checksum="$ARTIFACTS_FOLDER/maven-metadata.xml.sha256"
+
+  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/maven-metadata.xml" $filepath_metadata
+  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/maven-metadata.xml.sha256" $filepath_checksum
+
+  if ! echo "$(cat $filepath_checksum) $filepath_metadata" | sha256sum --quiet -c - ; then
+    return 1
+  fi
+
+  local java_tracer_version
+  java_tracer_version=$(grep -o "<latest>.*</latest>" $filepath_metadata | sed -e 's/<[^>]*>//g')
+
+  rm $filepath_metadata $filepath_checksum
+
+  echo "$java_tracer_version"
+}
+
+download_file() {
+  local url=$1
+  local filepath=$2
   if command -v curl >/dev/null 2>&1; then
     curl -Lo "$filepath" "$url"
   elif command -v wget >/dev/null 2>&1; then
     wget -O "$filepath" "$url"
   else
     >&2 echo "Error: Neither wget nor curl is installed."
-    return 1
-  fi
-
-  local updated_java_tool_options="-javaagent:$filepath $JAVA_TOOL_OPTIONS"
-  if [ ${#updated_java_tool_options} -le 1024 ]; then
-    echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
-    echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath || unzip -p $filepath META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
-  else
-    >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
     return 1
   fi
 }
@@ -82,8 +115,12 @@ install_js_tracer() {
 }
 
 is_node_version_compliant() {
-  local node_version=$(node -v | cut -d 'v' -f 2)
-  local major_node_version=$(echo $node_version | cut -d '.' -f 1)
+  local node_version
+  node_version=$(node -v | cut -d 'v' -f 2)
+
+  local major_node_version
+  major_node_version=$(echo $node_version | cut -d '.' -f 1)
+
   if [ "$major_node_version" -lt 18 ]; then
     return 1
   fi
@@ -109,13 +146,15 @@ install_python_tracer() {
     return 1
   fi
 
-  local dd_trace_path=$(pip show ddtrace | grep Location | awk '{print $2}')
+  local dd_trace_path
+  dd_trace_path=$(pip show ddtrace | grep Location | awk '{print $2}')
   if ! [ -d $dd_trace_path ]; then
     >&2 echo "Error: Could not determine ddtrace package location (tried $dd_trace_path)"
     return 1
   fi
 
-  local coverage_path=$(pip show coverage | grep Location | awk '{print $2}')
+  local coverage_path
+  coverage_path=$(pip show coverage | grep Location | awk '{print $2}')
   if ! [ -d $coverage_path ]; then
     >&2 echo "Error: Could not determine coverage package location (tried $coverage_path)"
     return 1
