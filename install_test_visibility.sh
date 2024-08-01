@@ -33,14 +33,25 @@ install_java_tracer() {
     return 1
   fi
 
-  local updated_java_tool_options="-javaagent:$filepath_tracer $JAVA_TOOL_OPTIONS"
-  if [ ${#updated_java_tool_options} -le 1024 ]; then
-    echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
-    echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
-  else
-    >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
-    return 1
-  fi
+  case $DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA in
+    gradle)
+      echo "GRADLE_OPTS=-Dorg.gradle.jvmargs=-javaagent:$filepath_tracer $GRADLE_OPTS"
+      ;;
+    maven)
+      echo "MAVEN_OPTS=-javaagent:$filepath_tracer $MAVEN_OPTS"
+      ;;
+    *)
+      local updated_java_tool_options="-javaagent:$filepath_tracer $JAVA_TOOL_OPTIONS"
+      if [ ${#updated_java_tool_options} -le 1024 ]; then
+        echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
+      else
+        >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
+        return 1
+      fi
+      ;;
+  esac
+
+  echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
 }
 
 get_latest_java_tracer_version() {
