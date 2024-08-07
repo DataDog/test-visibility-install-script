@@ -35,15 +35,15 @@ install_java_tracer() {
 
   case $DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA in
     gradle)
-      echo "GRADLE_OPTS=-Dorg.gradle.jvmargs=-javaagent:$filepath_tracer $GRADLE_OPTS"
+      echo "GRADLE_OPTS=\"-Dorg.gradle.jvmargs=-javaagent:$filepath_tracer $GRADLE_OPTS\""
       ;;
     maven)
-      echo "MAVEN_OPTS=-javaagent:$filepath_tracer $MAVEN_OPTS"
+      echo "MAVEN_OPTS=\"-javaagent:$filepath_tracer $MAVEN_OPTS\""
       ;;
     *)
       local updated_java_tool_options="-javaagent:$filepath_tracer $JAVA_TOOL_OPTIONS"
       if [ ${#updated_java_tool_options} -le 1024 ]; then
-        echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
+        echo "JAVA_TOOL_OPTIONS=\"$updated_java_tool_options\""
       else
         >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
         return 1
@@ -51,7 +51,7 @@ install_java_tracer() {
       ;;
   esac
 
-  echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
+  echo "DD_TRACER_VERSION_JAVA=\"$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)\""
 }
 
 get_latest_java_tracer_version() {
@@ -118,16 +118,16 @@ install_js_tracer() {
   local dd_trace_ci_init_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/ci/init"
   local dd_trace_register_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/register.js"
   if ! is_github_actions; then
-    echo "NODE_OPTIONS=$NODE_OPTIONS -r $dd_trace_ci_init_path"
+    echo "NODE_OPTIONS=\"$NODE_OPTIONS -r $dd_trace_ci_init_path\""
   else
-    echo "DD_TRACE_PACKAGE=$dd_trace_ci_init_path"
+    echo "DD_TRACE_PACKAGE=\"$dd_trace_ci_init_path\""
   fi
   # We can't set the --import flag directly in NODE_OPTIONS since it's only compatible from Node.js>=20.6.0 and Node.js>=18.19,
   # not even if !is_github_actions. 
   # Additionally, it's not useful for test frameworks other than vitest, which is ESM first. 
-  echo "DD_TRACE_ESM_IMPORT=$dd_trace_register_path"
+  echo "DD_TRACE_ESM_IMPORT=\"$dd_trace_register_path\""
 
-  echo "DD_TRACER_VERSION_JS=$(npm list -g dd-trace | grep dd-trace | awk -F@ '{print $2}')"
+  echo "DD_TRACER_VERSION_JS=\"$(npm list -g dd-trace | grep dd-trace | awk -F@ '{print $2}')\""
 }
 
 is_node_version_compliant() {
@@ -176,10 +176,10 @@ install_python_tracer() {
     return 1
   fi
 
-  echo "PYTHONPATH=$dd_trace_path:$coverage_path:$PYTHONPATH"
-  echo "PYTEST_ADDOPTS=--ddtrace $PYTEST_ADDOPTS"
+  echo "PYTHONPATH=\"$dd_trace_path:$coverage_path:$PYTHONPATH\""
+  echo "PYTEST_ADDOPTS=\"--ddtrace $PYTEST_ADDOPTS\""
 
-  echo "DD_TRACER_VERSION_PYTHON=$(pip show ddtrace | grep Version | cut -d ' ' -f2)"
+  echo "DD_TRACER_VERSION_PYTHON=\"$(pip show ddtrace | grep Version | cut -d ' ' -f2)\""
 
   deactivate >&2
 }
@@ -204,7 +204,7 @@ install_dotnet_tracer() {
   # Grepping to filter out lines that are not environment variables
   DD_CIVISIBILITY_AGENTLESS_ENABLED=true $ARTIFACTS_FOLDER/dd-trace ci configure jenkins | grep '='
 
-  echo "DD_TRACER_VERSION_DOTNET=$(dotnet tool list --tool-path $ARTIFACTS_FOLDER | grep dd-trace | awk '{print $2}')"
+  echo "DD_TRACER_VERSION_DOTNET=\"$(dotnet tool list --tool-path $ARTIFACTS_FOLDER | grep dd-trace | awk '{print $2}')\""
 }
 
 # set common environment variables
