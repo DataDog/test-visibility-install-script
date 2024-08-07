@@ -38,5 +38,5 @@ JAVA_TOOL_OPTIONS=-javaagent:./.datadog/dd-java-agent.jar
 
 If you want to set the variables printed by the script, use the following expression:
 ```shell
-export $(DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visibility.sh | xargs)
+eval $(DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visibility.sh | sed 's/^/export /')
 ```
