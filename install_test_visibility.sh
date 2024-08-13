@@ -29,7 +29,7 @@ install_java_tracer() {
   download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar" $filepath_tracer
   download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar.sha256" $filepath_checksum
 
-  if ! echo "$(cat $filepath_checksum) $filepath_tracer" | sha256sum --quiet -c - ; then
+  if ! verify_checksum "$(cat $filepath_checksum)" "$filepath_tracer"; then
     return 1
   fi
 
@@ -54,6 +54,21 @@ install_java_tracer() {
   echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
 }
 
+verify_checksum() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    if ! echo "$1 $2" | sha256sum --quiet -c -; then
+      return 1
+    fi
+  elif command -v shasum >/dev/null 2>&1; then
+    if ! echo "$1  $2" | shasum --quiet -a 256 -c -; then
+      return 1
+    fi
+  else
+    >&2 echo "Error: Neither sha256sum nor shasum is installed."
+    return 1
+  fi
+}
+
 get_latest_java_tracer_version() {
   local filepath_metadata
   filepath_metadata="$ARTIFACTS_FOLDER/maven-metadata.xml"
@@ -63,7 +78,7 @@ get_latest_java_tracer_version() {
   download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/maven-metadata.xml" $filepath_metadata
   download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/maven-metadata.xml.sha256" $filepath_checksum
 
-  if ! echo "$(cat $filepath_checksum) $filepath_metadata" | sha256sum --quiet -c - ; then
+  if ! verify_checksum "$(cat $filepath_checksum)" "$filepath_metadata"; then
     return 1
   fi
 
