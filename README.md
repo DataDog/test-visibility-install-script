@@ -44,3 +44,21 @@ while IFS='=' read -r name value; do
   fi
 done < <(DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=[...] DD_API_KEY=[...] ./install_test_visibility.sh)
 ```
+
+## Limitations
+
+### Tracing vitest tests
+
+ℹ️ This section is only relevant if you're running tests with [vitest](https://github.com/vitest-dev/vitest).
+
+To use this script with vitest you need to modify the NODE_OPTIONS environment variable adding the `--import` flag with the value of the `DD_TRACE_ESM_IMPORT` environment variable.
+
+```shell
+export NODE_OPTIONS="$NODE_OPTIONS --import=$DD_TRACE_ESM_IMPORT"
+```
+
+**Important**: `vitest` and `dd-trace` require Node.js>=18.19 or Node.js>=20.6 to work together.
+
+### Tracing cypress tests
+
+To instrument your [Cypress](https://www.cypress.io/) tests with Datadog Test Visibility, please follow the manual steps in the [docs](https://docs.datadoghq.com/tests/setup/javascript/?tab=cypress).
