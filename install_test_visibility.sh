@@ -40,7 +40,13 @@ install_java_tracer() {
     maven)
       echo "MAVEN_OPTS=-javaagent:$filepath_tracer $MAVEN_OPTS"
       ;;
-    *)
+    sbt)
+      echo "SBT_OPTS=-javaagent:$filepath_tracer SBT_OPTS"
+      ;;
+    ant)
+      echo "ANT_OPTS=-javaagent:$filepath_tracer ANT_OPTS"
+      ;;
+    all)
       local updated_java_tool_options="-javaagent:$filepath_tracer $JAVA_TOOL_OPTIONS"
       if [ ${#updated_java_tool_options} -le 1024 ]; then
         echo "JAVA_TOOL_OPTIONS=$updated_java_tool_options"
@@ -48,6 +54,12 @@ install_java_tracer() {
         >&2 echo "Error: Cannot apply Java instrumentation: updated JAVA_TOOL_OPTIONS would exceed 1024 characters"
         return 1
       fi
+      ;;
+    *)
+      echo "GRADLE_OPTS=-Dorg.gradle.jvmargs=-javaagent:$filepath_tracer $GRADLE_OPTS"
+      echo "MAVEN_OPTS=-javaagent:$filepath_tracer $MAVEN_OPTS"
+      echo "SBT_OPTS=-javaagent:$filepath_tracer $SBT_OPTS"
+      echo "ANT_OPTS=-javaagent:$filepath_tracer $ANT_OPTS"
       ;;
   esac
 
@@ -138,8 +150,8 @@ install_js_tracer() {
     echo "DD_TRACE_PACKAGE=$dd_trace_ci_init_path"
   fi
   # We can't set the --import flag directly in NODE_OPTIONS since it's only compatible from Node.js>=20.6.0 and Node.js>=18.19,
-  # not even if !is_github_actions. 
-  # Additionally, it's not useful for test frameworks other than vitest, which is ESM first. 
+  # not even if !is_github_actions.
+  # Additionally, it's not useful for test frameworks other than vitest, which is ESM first.
   echo "DD_TRACE_ESM_IMPORT=$dd_trace_register_path"
 
   echo "DD_TRACER_VERSION_JS=$(npm list -g dd-trace | grep dd-trace | awk -F@ '{print $2}')"
