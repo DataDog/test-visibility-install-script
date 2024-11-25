@@ -35,7 +35,7 @@ install_java_tracer() {
 
   case $DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA in
     gradle)
-      echo "GRADLE_OPTS=-Dorg.gradle.jvmargs=-javaagent:$filepath_tracer $GRADLE_OPTS"
+      echo "GRADLE_OPTS=-javaagent:$filepath_tracer $GRADLE_OPTS"
       ;;
     maven)
       echo "MAVEN_OPTS=-javaagent:$filepath_tracer $MAVEN_OPTS"
@@ -56,7 +56,7 @@ install_java_tracer() {
       fi
       ;;
     *)
-      echo "GRADLE_OPTS=-Dorg.gradle.jvmargs=-javaagent:$filepath_tracer $GRADLE_OPTS"
+      echo "GRADLE_OPTS=-javaagent:$filepath_tracer $GRADLE_OPTS"
       echo "MAVEN_OPTS=-javaagent:$filepath_tracer $MAVEN_OPTS"
       echo "SBT_OPTS=-javaagent:$filepath_tracer $SBT_OPTS"
       echo "ANT_OPTS=-javaagent:$filepath_tracer $ANT_OPTS"
