@@ -234,6 +234,25 @@ install_dotnet_tracer() {
   echo "DD_TRACER_VERSION_DOTNET=$(dotnet tool list --tool-path $ARTIFACTS_FOLDER | grep dd-trace | awk '{print $2}')"
 }
 
+install_ruby_tracer() {
+  if ! command -v ruby >/dev/null 2>&1; then
+    >&2 echo "Error: ruby is not installed."
+    return 1
+  fi
+
+  if ! command -v bundle >/dev/null 2>&1; then
+    >&2 echo "Error: bundle is not installed."
+    return 1
+  fi
+
+  if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+--version $DD_SET_TRACER_VERSION_RUBY} >&2; then
+    >&2 echo "Error: Could not install datadog-ci gem for Ruby"
+    return 1
+  fi
+
+  echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
+}
+
 # set common environment variables
 echo "DD_CIVISIBILITY_ENABLED=true"
 echo "DD_CIVISIBILITY_AGENTLESS_ENABLED=true"
@@ -245,7 +264,7 @@ fi
 # install tracer libraries
 if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
   if [ "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" = "all" ]; then
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet"
+    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet ruby"
   fi
 
   for lang in $( echo "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" )
@@ -263,13 +282,16 @@ if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
       dotnet)
         install_dotnet_tracer
         ;;
+      ruby)
+        install_ruby_tracer
+        ;;
       *)
-        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet"
+        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet, ruby"
         exit 1;
         ;;
     esac
   done
 else
-  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet"
+  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby"
   exit 1;
 fi
