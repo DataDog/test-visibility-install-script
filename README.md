@@ -3,7 +3,7 @@
 A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Optimization](https://docs.datadoghq.com/tests/).
 The variables are printed in the following format: variableName=variableValue
 
-Supported languages are .NET, Java, Javascript, and Python.
+Supported languages are .NET, Java, Javascript, Python, and Ruby.
 
 ## About Datadog Test Optimization
 
