@@ -240,17 +240,17 @@ install_ruby_tracer() {
     return 1
   fi
 
-  if ! command -v bundle >/dev/null 2>&1; then
-    >&2 echo "Error: bundle is not installed."
+  if ! command -v gem >/dev/null 2>&1; then
+    >&2 echo "Error: rubygems is not installed."
     return 1
   fi
 
-  if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+--version $DD_SET_TRACER_VERSION_RUBY} >&2; then
+  if ! gem install datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
     >&2 echo "Error: Could not install datadog-ci gem for Ruby"
     return 1
   fi
 
-  echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
+  echo "RUBYOPT=-rdatadog/ci/auto_instrument"
 }
 
 # set common environment variables
