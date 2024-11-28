@@ -16,6 +16,14 @@ if ! mkdir -p $ARTIFACTS_FOLDER; then
   return 1
 fi
 
+extract_major_version() {
+  echo $1 | cut -d '.' -f 1
+}
+
+extract_minor_version() {
+  echo $1 | cut -d '.' -f 2
+}
+
 install_java_tracer() {
   if [ -z "$DD_SET_TRACER_VERSION_JAVA" ]; then
       DD_SET_TRACER_VERSION_JAVA=$(get_latest_java_tracer_version)
@@ -234,6 +242,21 @@ install_dotnet_tracer() {
   echo "DD_TRACER_VERSION_DOTNET=$(dotnet tool list --tool-path $ARTIFACTS_FOLDER | grep dd-trace | awk '{print $2}')"
 }
 
+is_ruby_version_compliant() {
+  local ruby_version
+  ruby_version=$(ruby -v | cut -d ' ' -f 2)
+
+  local major_ruby_version
+  local minor_ruby_version
+
+  major_ruby_version=$(extract_major_version $ruby_version)
+  minor_ruby_version=$(extract_minor_version $ruby_version)
+
+  if [ "$major_ruby_version" -lt 2 ] || [ "$major_ruby_version" -eq 2 ] && [ "$minor_ruby_version" -lt 7 ]; then
+    return 1
+  fi
+}
+
 install_ruby_tracer() {
   if ! command -v ruby >/dev/null 2>&1; then
     >&2 echo "Error: ruby is not installed."
@@ -242,6 +265,11 @@ install_ruby_tracer() {
 
   if ! command -v bundle >/dev/null 2>&1; then
     >&2 echo "Error: bundle is not installed."
+    return 1
+  fi
+
+  if ! is_ruby_version_compliant; then
+    >&2 echo "Error: ruby v2.7.0 or newer is required, got $(ruby -v)"
     return 1
   fi
 
