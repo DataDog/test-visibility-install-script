@@ -1,13 +1,13 @@
-# <img height="25" src="CIVislogo.png" /> Datadog Test Visibility installation script
+# <img height="25" src="CIVislogo.png" /> Datadog Test Optimization installation script
 
-A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Visibility](https://docs.datadoghq.com/tests/).
+A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Optimization](https://docs.datadoghq.com/tests/).
 The variables are printed in the following format: variableName=variableValue
 
 Supported languages are .NET, Java, Javascript, and Python.
 
-## About Datadog Test Visibility
+## About Datadog Test Optimization
 
-[Test Visibility](https://docs.datadoghq.com/tests/) provides a test-first view into your CI health by displaying important metrics and results from your tests.
+[Test Optimization](https://docs.datadoghq.com/tests/) provides a test-first view into your CI health by displaying important metrics and results from your tests.
 It can help you investigate and mitigate performance problems and test failures that are most relevant to your work, focusing on the code you are responsible for, rather than the pipelines which run your tests.
 
 ## Usage
@@ -31,7 +31,7 @@ The script parameters are
 - `DD_SET_TRACER_VERSION_RUBY`: (optional) Version of the Ruby datadog-ci gem to install. If not provided, the latest version is installed.
 - `DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA`: (optional) A hint for Java instrumentation to instrument a specific build system. Allowed values are `maven`, `gradle`, `sbt`, `ant`, and `all`. If not specified, every Maven, Gradle, SBT, and Ant build will be instrumented. `all` is a special value that allows instrumenting _every JVM process_.
 
-The script will install the libraries and print the list of environment variables that should be set in order to enable Test Visibility. Example output:
+The script will install the libraries and print the list of environment variables that should be set in order to enable Test Optimization. Example output:
 
 ```shell
 DD_CIVISIBILITY_ENABLED=true
@@ -66,4 +66,4 @@ export NODE_OPTIONS="$NODE_OPTIONS --import=$DD_TRACE_ESM_IMPORT"
 
 ### Tracing cypress tests
 
-To instrument your [Cypress](https://www.cypress.io/) tests with Datadog Test Visibility, please follow the manual steps in the [docs](https://docs.datadoghq.com/tests/setup/javascript/?tab=cypress).
+To instrument your [Cypress](https://www.cypress.io/) tests with Datadog Test Optimization, please follow the manual steps in the [docs](https://docs.datadoghq.com/tests/setup/javascript/?tab=cypress).
