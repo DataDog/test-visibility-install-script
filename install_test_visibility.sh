@@ -240,17 +240,24 @@ install_ruby_tracer() {
     return 1
   fi
 
-  if ! command -v gem >/dev/null 2>&1; then
-    >&2 echo "Error: rubygems is not installed."
+  if ! command -v bundle >/dev/null 2>&1; then
+    >&2 echo "Error: bundle is not installed."
     return 1
   fi
 
-  if ! gem install datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
+  # we need to unfreeze bundle to install the datadog-ci gem
+  if ! bundle config --delete frozen >&2; then
+    >&2 echo "Error: Could not unfreeze bundle"
+    return 1
+  fi
+
+  # datadog-ci gem must be part of Gemfile.lock to load it within bundled environment
+  if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
     >&2 echo "Error: Could not install datadog-ci gem for Ruby"
     return 1
   fi
 
-  echo "RUBYOPT=-rdatadog/ci/auto_instrument"
+  echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
 }
 
 # set common environment variables
