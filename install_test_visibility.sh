@@ -246,7 +246,7 @@ install_ruby_tracer() {
   fi
 
   # we need to unfreeze bundle to install the datadog-ci gem
-  if ! bundle config --delete frozen >&2; then
+  if ! bundle config set frozen false >&2; then
     >&2 echo "Error: Could not unfreeze bundle"
     return 1
   fi
