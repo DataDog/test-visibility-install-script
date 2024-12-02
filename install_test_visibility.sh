@@ -272,6 +272,32 @@ is_rubygems_version_compliant() {
   fi
 }
 
+is_datadog_ci_present() {
+  if ! bundle info datadog-ci >/dev/null 2>&1 ; then
+    return 1
+  fi
+}
+
+is_datadog_ci_version_compliant() {
+  if ! is_datadog_ci_present; then
+    >&2 echo "datadog-ci is not present"
+    return 1
+  fi
+
+  local datadog_ci_version
+  datadog_ci_version=$(bundle info datadog-ci | head -n 1 | awk -F '[()]' '{print $2}')
+
+  local major_datadog_ci_version
+  local minor_datadog_ci_version
+
+  major_datadog_ci_version=$(extract_major_version $datadog_ci_version)
+  minor_datadog_ci_version=$(extract_minor_version $datadog_ci_version)
+
+  if [ "$major_datadog_ci_version" -lt 1 ] || [ "$major_datadog_ci_version" -eq 1 ] && [ "$minor_datadog_ci_version" -lt 9 ]; then
+    return 1
+  fi
+}
+
 install_ruby_tracer() {
   if ! command -v ruby >/dev/null 2>&1; then
     >&2 echo "Error: ruby is not installed."
@@ -307,6 +333,12 @@ install_ruby_tracer() {
   # datadog-ci gem must be part of Gemfile.lock to load it within bundled environment
   if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
     >&2 echo "Error: Could not install datadog-ci gem for Ruby"
+    return 1
+  fi
+
+  # check that datadog-ci version installed if at least 1.9.0 (when auto instrumentation was introduced)
+  if ! is_datadog_ci_version_compliant; then
+    >&2 echo "Error: datadog-ci v1.9.0 or newer is required, got $(bundle show datadog-ci)"
     return 1
   fi
 
