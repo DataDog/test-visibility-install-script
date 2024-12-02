@@ -278,6 +278,26 @@ is_gem_present() {
   fi
 }
 
+is_gem_datadog_version_compliant() {
+  # if there is no datadog gem in the bundle, it's ok, we are going to add it
+  if ! is_gem_present "datadog"; then
+    return 0
+  fi
+
+  local datadog_version
+  datadog_version=$(bundle info datadog | head -n 1 | awk -F '[()]' '{print $2}')
+
+  local major_datadog_version
+  local minor_datadog_version
+
+  major_datadog_version=$(extract_major_version $datadog_version)
+  minor_datadog_version=$(extract_minor_version $datadog_version)
+
+  if [ "$major_datadog_version" -eq 2 ] && [ "$minor_datadog_version" -lt 4 ]; then
+    return 1
+  fi
+}
+
 is_datadog_ci_version_compliant() {
   if ! is_gem_present "datadog-ci"; then
     return 1
@@ -325,6 +345,11 @@ install_ruby_tracer() {
 
   if is_gem_present "ddtrace"; then
     >&2 echo "Error: ddtrace gem is incompatible with datadog-ci gem. Please upgrade to gem datadog v2.4 or newer: https://github.com/DataDog/dd-trace-rb/blob/master/docs/UpgradeGuide2.md"
+    return 1
+  fi
+
+  if ! is_gem_datadog_version_compliant; then
+    >&2 echo "Error: datadog gem v2.4 or newer is required, got $(bundle show datadog)"
     return 1
   fi
 
