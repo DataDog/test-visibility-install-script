@@ -257,6 +257,21 @@ is_ruby_version_compliant() {
   fi
 }
 
+is_rubygems_version_compliant() {
+  local rubygems_version
+  rubygems_version=$(gem -v)
+
+  local major_rubygems_version
+  local minor_rubygems_version
+
+  major_rubygems_version=$(extract_major_version $rubygems_version)
+  minor_rubygems_version=$(extract_minor_version $rubygems_version)
+
+  if [ "$major_rubygems_version" -lt 3 ] || [ "$major_rubygems_version" -eq 3 ] && [ "$minor_rubygems_version" -lt 3 ]; then
+    return 1
+  fi
+}
+
 install_ruby_tracer() {
   if ! command -v ruby >/dev/null 2>&1; then
     >&2 echo "Error: ruby is not installed."
@@ -275,6 +290,11 @@ install_ruby_tracer() {
 
   if ! is_ruby_version_compliant; then
     >&2 echo "Error: ruby v2.7.0 or newer is required, got $(ruby -v)"
+    return 1
+  fi
+
+  if ! is_rubygems_version_compliant; then
+    >&2 echo "Error: rubygems v3.3.22 or newer is required, got $(gem -v)"
     return 1
   fi
 
