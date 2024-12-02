@@ -328,16 +328,19 @@ install_ruby_tracer() {
     return 1
   fi
 
-  # we need to "unfreeze" bundle to install the datadog-ci gem
-  if ! bundle config set frozen false >&2; then
-    >&2 echo "Error: Could not unfreeze bundle"
-    return 1
-  fi
+  # add datadog-ci gem to the bundle only if it's not already present
+  if ! is_gem_present "datadog-ci"; then
+    # we need to "unfreeze" bundle to install the datadog-ci gem
+    if ! bundle config set frozen false >&2; then
+      >&2 echo "Error: Could not unfreeze bundle"
+      return 1
+    fi
 
-  # datadog-ci gem must be part of Gemfile.lock to load it within bundled environment
-  if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
-    >&2 echo "Error: Could not install datadog-ci gem for Ruby"
-    return 1
+    # datadog-ci gem must be part of Gemfile.lock to load it within bundled environment
+    if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
+      >&2 echo "Error: Could not install datadog-ci gem for Ruby"
+      return 1
+    fi
   fi
 
   # check that datadog-ci version installed if at least 1.9.0 (when auto instrumentation was introduced)
