@@ -272,15 +272,14 @@ is_rubygems_version_compliant() {
   fi
 }
 
-is_datadog_ci_present() {
-  if ! bundle info datadog-ci >/dev/null 2>&1 ; then
+is_gem_present() {
+  if ! bundle info $1 >/dev/null 2>&1 ; then
     return 1
   fi
 }
 
 is_datadog_ci_version_compliant() {
-  if ! is_datadog_ci_present; then
-    >&2 echo "datadog-ci is not present"
+  if ! is_gem_present "datadog-ci"; then
     return 1
   fi
 
@@ -321,6 +320,11 @@ install_ruby_tracer() {
 
   if ! is_rubygems_version_compliant; then
     >&2 echo "Error: rubygems v3.3.22 or newer is required, got $(gem -v)"
+    return 1
+  fi
+
+  if is_gem_present "ddtrace"; then
+    >&2 echo "Error: ddtrace gem is incompatible with datadog-ci gem. Please upgrade to gem datadog v2.4 or newer: https://github.com/DataDog/dd-trace-rb/blob/master/docs/UpgradeGuide2.md"
     return 1
   fi
 
