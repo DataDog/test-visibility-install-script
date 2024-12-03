@@ -16,6 +16,14 @@ if ! mkdir -p $ARTIFACTS_FOLDER; then
   return 1
 fi
 
+extract_major_version() {
+  echo "$1" | cut -d '.' -f 1
+}
+
+extract_minor_version() {
+  echo "$1" | cut -d '.' -f 2
+}
+
 install_java_tracer() {
   if [ -z "$DD_SET_TRACER_VERSION_JAVA" ]; then
       DD_SET_TRACER_VERSION_JAVA=$(get_latest_java_tracer_version)
@@ -234,6 +242,141 @@ install_dotnet_tracer() {
   echo "DD_TRACER_VERSION_DOTNET=$(dotnet tool list --tool-path $ARTIFACTS_FOLDER | grep dd-trace | awk '{print $2}')"
 }
 
+is_ruby_version_compliant() {
+  local ruby_version
+  ruby_version=$(ruby -v | cut -d ' ' -f 2)
+
+  local major_ruby_version
+  local minor_ruby_version
+
+  major_ruby_version=$(extract_major_version "$ruby_version")
+  minor_ruby_version=$(extract_minor_version "$ruby_version")
+
+  if [ "$major_ruby_version" -lt 2 ] || ([ "$major_ruby_version" -eq 2 ] && [ "$minor_ruby_version" -lt 7 ]); then
+    return 1
+  fi
+}
+
+is_rubygems_version_compliant() {
+  local rubygems_version
+  rubygems_version=$(gem -v)
+
+  local major_rubygems_version
+  local minor_rubygems_version
+
+  major_rubygems_version=$(extract_major_version "$rubygems_version")
+  minor_rubygems_version=$(extract_minor_version "$rubygems_version")
+
+  if [ "$major_rubygems_version" -lt 3 ] || ([ "$major_rubygems_version" -eq 3 ] && [ "$minor_rubygems_version" -lt 3 ]); then
+    return 1
+  fi
+}
+
+is_gem_present() {
+  if ! bundle info $1 >/dev/null 2>&1 ; then
+    return 1
+  fi
+}
+
+is_gem_datadog_version_compliant() {
+  # if there is no datadog gem in the bundle, it's ok, we are going to add it
+  if ! is_gem_present "datadog"; then
+    return 0
+  fi
+
+  local datadog_version
+  datadog_version=$(bundle info datadog | head -n 1 | awk -F '[()]' '{print $2}')
+
+  local major_datadog_version
+  local minor_datadog_version
+
+  major_datadog_version=$(extract_major_version "$datadog_version")
+  minor_datadog_version=$(extract_minor_version "$datadog_version")
+
+  if [ "$major_datadog_version" -eq 2 ] && [ "$minor_datadog_version" -lt 4 ]; then
+    return 1
+  fi
+}
+
+is_datadog_ci_version_compliant() {
+  if ! is_gem_present "datadog-ci"; then
+    return 1
+  fi
+
+  local datadog_ci_version
+  datadog_ci_version=$(bundle info datadog-ci | head -n 1 | awk -F '[()]' '{print $2}')
+
+  local major_datadog_ci_version
+  local minor_datadog_ci_version
+
+  major_datadog_ci_version=$(extract_major_version "$datadog_ci_version")
+  minor_datadog_ci_version=$(extract_minor_version "$datadog_ci_version")
+
+  if [ "$major_datadog_ci_version" -lt 1 ] || ([ "$major_datadog_ci_version" -eq 1 ] && [ "$minor_datadog_ci_version" -lt 9 ]); then
+    return 1
+  fi
+}
+
+install_ruby_tracer() {
+  if ! command -v ruby >/dev/null 2>&1; then
+    >&2 echo "Error: ruby is not installed."
+    return 1
+  fi
+
+  if ! command -v bundle >/dev/null 2>&1; then
+    >&2 echo "Error: bundler is not installed."
+    return 1
+  fi
+
+  if ! command -v gem >/dev/null 2>&1; then
+    >&2 echo "Error: rubygems is not installed."
+    return 1
+  fi
+
+  if ! is_ruby_version_compliant; then
+    >&2 echo "Error: ruby v2.7.0 or newer is required, got $(ruby -v)"
+    return 1
+  fi
+
+  if ! is_rubygems_version_compliant; then
+    >&2 echo "Error: rubygems v3.3.22 or newer is required, got $(gem -v)"
+    return 1
+  fi
+
+  if is_gem_present "ddtrace"; then
+    >&2 echo "Error: ddtrace gem is incompatible with datadog-ci gem. Please upgrade to gem datadog v2.4 or newer: https://github.com/DataDog/dd-trace-rb/blob/master/docs/UpgradeGuide2.md"
+    return 1
+  fi
+
+  if ! is_gem_datadog_version_compliant; then
+    >&2 echo "Error: datadog gem v2.4 or newer is required, got $(bundle show datadog)"
+    return 1
+  fi
+
+  # add datadog-ci gem to the bundle only if it's not already present
+  if ! is_gem_present "datadog-ci"; then
+    # we need to "unfreeze" bundle to install the datadog-ci gem
+    if ! bundle config set frozen false >&2; then
+      >&2 echo "Error: Could not unfreeze bundle"
+      return 1
+    fi
+
+    # datadog-ci gem must be part of Gemfile.lock to load it within bundled environment
+    if ! bundle add datadog-ci ${DD_SET_TRACER_VERSION_RUBY:+-v $DD_SET_TRACER_VERSION_RUBY} >&2; then
+      >&2 echo "Error: Could not install datadog-ci gem for Ruby"
+      return 1
+    fi
+  fi
+
+  # check that datadog-ci version installed if at least 1.9.0 (when auto instrumentation was introduced)
+  if ! is_datadog_ci_version_compliant; then
+    >&2 echo "Error: datadog-ci v1.9.0 or newer is required, got $(bundle show datadog-ci)"
+    return 1
+  fi
+
+  echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
+}
+
 # set common environment variables
 echo "DD_CIVISIBILITY_ENABLED=true"
 echo "DD_CIVISIBILITY_AGENTLESS_ENABLED=true"
@@ -245,7 +388,7 @@ fi
 # install tracer libraries
 if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
   if [ "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" = "all" ]; then
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet"
+    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet ruby"
   fi
 
   for lang in $( echo "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" )
@@ -263,13 +406,16 @@ if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
       dotnet)
         install_dotnet_tracer
         ;;
+      ruby)
+        install_ruby_tracer
+        ;;
       *)
-        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet"
+        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet, ruby"
         exit 1;
         ;;
     esac
   done
 else
-  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet"
+  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby"
   exit 1;
 fi

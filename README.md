@@ -1,24 +1,26 @@
-# <img height="25" src="CIVislogo.png" /> Datadog Test Visibility installation script
+# <img height="25" src="CIVislogo.png" /> Datadog Test Optimization installation script
 
-A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Visibility](https://docs.datadoghq.com/tests/).
+A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Optimization](https://docs.datadoghq.com/tests/).
 The variables are printed in the following format: variableName=variableValue
 
-Supported languages are .NET, Java, Javascript, and Python.
+Supported languages are .NET, Java, Javascript, Python, and Ruby.
 
-## About Datadog Test Visibility
+## About Datadog Test Optimization
 
-[Test Visibility](https://docs.datadoghq.com/tests/) provides a test-first view into your CI health by displaying important metrics and results from your tests. 
+[Test Optimization](https://docs.datadoghq.com/tests/) provides a test-first view into your CI health by displaying important metrics and results from your tests.
 It can help you investigate and mitigate performance problems and test failures that are most relevant to your work, focusing on the code you are responsible for, rather than the pipelines which run your tests.
 
 ## Usage
 
 Run the script with the necessary parameters:
+
 ```shell
 DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visibility.sh
 ```
 
 The script parameters are
-- `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet` (multiple languages can be specified as a space-separated list).
+
+- `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet`, `ruby` (multiple languages can be specified as a space-separated list).
 - `DD_API_KEY`: (required for .NET tracer installation) Datadog API key. Can be found at https://app.datadoghq.com/organization-settings/api-keys
 - `DD_TRACER_FOLDER`: (optional) The folder where the tracing libraries will be installed, defaults to `./.datadog`
 - `DD_SITE`: (optional) Datadog site, defaults to US1. See https://docs.datadoghq.com/getting_started/site for more information about sites.
@@ -26,9 +28,11 @@ The script parameters are
 - `DD_SET_TRACER_VERSION_JAVA`: (optional) Version of the Java tracer to install (without the `v` prefix, e.g. `1.37.1`). If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_JS`: (optional) Version of the JS tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_PYTHON`: (optional) Version of the Python tracer to install. If not provided, the latest version is installed.
+- `DD_SET_TRACER_VERSION_RUBY`: (optional) Version of the Ruby datadog-ci gem to install. If not provided, the latest version is installed.
 - `DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA`: (optional) A hint for Java instrumentation to instrument a specific build system. Allowed values are `maven`, `gradle`, `sbt`, `ant`, and `all`. If not specified, every Maven, Gradle, SBT, and Ant build will be instrumented. `all` is a special value that allows instrumenting _every JVM process_.
 
-The script will install the libraries and print the list of environment variables that should be set in order to enable Test Visibility. Example output:
+The script will install the libraries and print the list of environment variables that should be set in order to enable Test Optimization. Example output:
+
 ```shell
 DD_CIVISIBILITY_ENABLED=true
 DD_CIVISIBILITY_AGENTLESS_ENABLED=true
@@ -37,6 +41,7 @@ JAVA_TOOL_OPTIONS=-javaagent:./.datadog/dd-java-agent.jar
 ```
 
 If you want to set the variables printed by the script, use the following expression:
+
 ```shell
 while IFS='=' read -r name value; do
   if [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
@@ -61,4 +66,4 @@ export NODE_OPTIONS="$NODE_OPTIONS --import=$DD_TRACE_ESM_IMPORT"
 
 ### Tracing cypress tests
 
-To instrument your [Cypress](https://www.cypress.io/) tests with Datadog Test Visibility, please follow the manual steps in the [docs](https://docs.datadoghq.com/tests/setup/javascript/?tab=cypress).
+To instrument your [Cypress](https://www.cypress.io/) tests with Datadog Test Optimization, please follow the manual steps in the [docs](https://docs.datadoghq.com/tests/setup/javascript/?tab=cypress).
