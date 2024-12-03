@@ -17,11 +17,11 @@ if ! mkdir -p $ARTIFACTS_FOLDER; then
 fi
 
 extract_major_version() {
-  echo $1 | cut -d '.' -f 1
+  echo "$1" | cut -d '.' -f 1
 }
 
 extract_minor_version() {
-  echo $1 | cut -d '.' -f 2
+  echo "$1" | cut -d '.' -f 2
 }
 
 install_java_tracer() {
@@ -249,8 +249,8 @@ is_ruby_version_compliant() {
   local major_ruby_version
   local minor_ruby_version
 
-  major_ruby_version=$(extract_major_version $ruby_version)
-  minor_ruby_version=$(extract_minor_version $ruby_version)
+  major_ruby_version=$(extract_major_version "$ruby_version")
+  minor_ruby_version=$(extract_minor_version "$ruby_version")
 
   if [ "$major_ruby_version" -lt 2 ] || ([ "$major_ruby_version" -eq 2 ] && [ "$minor_ruby_version" -lt 7 ]); then
     return 1
@@ -264,8 +264,8 @@ is_rubygems_version_compliant() {
   local major_rubygems_version
   local minor_rubygems_version
 
-  major_rubygems_version=$(extract_major_version $rubygems_version)
-  minor_rubygems_version=$(extract_minor_version $rubygems_version)
+  major_rubygems_version=$(extract_major_version "$rubygems_version")
+  minor_rubygems_version=$(extract_minor_version "$rubygems_version")
 
   if [ "$major_rubygems_version" -lt 3 ] || ([ "$major_rubygems_version" -eq 3 ] && [ "$minor_rubygems_version" -lt 3 ]); then
     return 1
@@ -290,8 +290,8 @@ is_gem_datadog_version_compliant() {
   local major_datadog_version
   local minor_datadog_version
 
-  major_datadog_version=$(extract_major_version $datadog_version)
-  minor_datadog_version=$(extract_minor_version $datadog_version)
+  major_datadog_version=$(extract_major_version "$datadog_version")
+  minor_datadog_version=$(extract_minor_version "$datadog_version")
 
   if [ "$major_datadog_version" -eq 2 ] && [ "$minor_datadog_version" -lt 4 ]; then
     return 1
@@ -309,8 +309,8 @@ is_datadog_ci_version_compliant() {
   local major_datadog_ci_version
   local minor_datadog_ci_version
 
-  major_datadog_ci_version=$(extract_major_version $datadog_ci_version)
-  minor_datadog_ci_version=$(extract_minor_version $datadog_ci_version)
+  major_datadog_ci_version=$(extract_major_version "$datadog_ci_version")
+  minor_datadog_ci_version=$(extract_minor_version "$datadog_ci_version")
 
   if [ "$major_datadog_ci_version" -lt 1 ] || ([ "$major_datadog_ci_version" -eq 1 ] && [ "$minor_datadog_ci_version" -lt 9 ]); then
     return 1
