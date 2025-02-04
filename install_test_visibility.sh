@@ -384,8 +384,12 @@ install_go_tracer() {
     return 1
   fi
 
+  if [ -z "$DD_SET_TRACER_VERSION_GO" ]; then
+      DD_SET_TRACER_VERSION_GO=latest
+  fi
+
   # Install orchestrion using go install
-  if ! go install github.com/DataDog/orchestrion@latest >&2; then
+  if ! go install github.com/DataDog/orchestrion@$DD_SET_TRACER_VERSION_GO >&2; then
     >&2 echo "Error: Could not install orchestrion for Go."
     return 1
   fi
