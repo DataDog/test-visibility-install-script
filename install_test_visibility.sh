@@ -394,6 +394,18 @@ install_go_tracer() {
     return 1
   fi
 
+  # Pin orchestrion
+  if ! orchestrion pin >&2; then
+    >&2 echo "Error: Orchestrion pin failed."
+    return 1
+  fi
+
+  # Run go get to update dependencies
+  if ! go get github.com/DataDog/orchestrion >&2; then
+    >&2 echo "Error: go get github.com/DataDog/orchestrion failed."
+    return 1
+  fi
+
   # Append orchestrion to the GOFLAGS variable to enable Test Optimization.
   echo "GOFLAGS=${GOFLAGS} '-toolexec=orchestrion toolexec'"
 
