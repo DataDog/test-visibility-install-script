@@ -225,7 +225,7 @@ install_dotnet_tracer() {
     return 1
   fi
 
-  if ! dotnet tool update --tool-path $ARTIFACTS_FOLDER dd-trace ${DD_SET_TRACER_VERSION_DOTNET:+--version $DD_SET_TRACER_VERSION_DOTNET} >&2; then
+  if ! dotnet tool update --tool-path $ARTIFACTS_FOLDER dd-trace ${DD_SET_TRACER_VERSION_DOTNET:+--version $DD_SET_TRACER_VERSION_DOTNET} --allow-downgrade >&2; then
     >&2 echo "Error: Could not install dd-trace for .NET"
     return 1
   fi
@@ -377,6 +377,31 @@ install_ruby_tracer() {
   echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
 }
 
+install_go_tracer() {
+  # Check if go is installed
+  if ! command -v go >/dev/null 2>&1; then
+    >&2 echo "Error: go is not installed."
+    return 1
+  fi
+
+  # Install orchestrion using go install
+  if ! go install github.com/DataDog/orchestrion@latest >&2; then
+    >&2 echo "Error: Could not install orchestrion for Go."
+    return 1
+  fi
+
+  # Append orchestrion to the GOFLAGS variable to enable Test Optimization.
+  echo "GOFLAGS=${GOFLAGS} '-toolexec=orchestrion toolexec'"
+
+  # Retrieve orchestrion version and extract only the version part.
+  local orchestrion_output
+  orchestrion_output=$(orchestrion version 2>/dev/null || echo "orchestrion vlatest")
+  # The output is expected to be like: "orchestrion v1.0.2"
+  local orchestrion_version
+  orchestrion_version=$(echo "$orchestrion_output" | awk '{print $2}')
+  echo "DD_TRACER_VERSION_GO=${orchestrion_version}"
+}
+
 # set common environment variables
 echo "DD_CIVISIBILITY_ENABLED=true"
 echo "DD_CIVISIBILITY_AGENTLESS_ENABLED=true"
@@ -388,7 +413,7 @@ fi
 # install tracer libraries
 if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
   if [ "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" = "all" ]; then
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet ruby"
+    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet ruby go"
   fi
 
   for lang in $( echo "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" )
@@ -409,13 +434,16 @@ if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
       ruby)
         install_ruby_tracer
         ;;
+      go)
+        install_go_tracer
+        ;;
       *)
-        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet, ruby"
+        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet, ruby, go"
         exit 1;
         ;;
     esac
   done
 else
-  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby"
+  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby, go"
   exit 1;
 fi
