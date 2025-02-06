@@ -225,7 +225,16 @@ install_dotnet_tracer() {
     return 1
   fi
 
-  if ! dotnet tool update --tool-path $ARTIFACTS_FOLDER dd-trace ${DD_SET_TRACER_VERSION_DOTNET:+--version $DD_SET_TRACER_VERSION_DOTNET} --allow-downgrade >&2; then
+  # Uninstall any previous global installation of dd-trace.
+  # Ignore errors if the tool is not installed.
+  dotnet tool uninstall --global dd-trace >/dev/null 2>&1 || true
+
+  # Uninstall any previous local installation of dd-trace in the artifacts folder.
+  # Again, ignore errors if not installed.
+  dotnet tool uninstall --tool-path $ARTIFACTS_FOLDER dd-trace >/dev/null 2>&1 || true
+
+  # Update (or install) dd-trace in the artifacts folder.
+  if ! dotnet tool update --tool-path $ARTIFACTS_FOLDER dd-trace ${DD_SET_TRACER_VERSION_DOTNET:+--version $DD_SET_TRACER_VERSION_DOTNET} >&2; then
     >&2 echo "Error: Could not install dd-trace for .NET"
     return 1
   fi
