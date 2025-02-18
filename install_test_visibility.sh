@@ -508,7 +508,7 @@ install_go_tracer() {
   orchestrion_go_version=$(get_orchestrion_go_version "$DD_SET_TRACER_VERSION_GO")
   if [ $? -ne 0 ] || [ -z "$orchestrion_go_version" ]; then
       echo "Error: Could not retrieve the required Go version for orchestrion (tag: $DD_SET_TRACER_VERSION_GO)." >&2
-      echo "Skipping orchestrion installation."
+      echo "Skipping orchestrion installation." >&2
       return 0
   fi
 
@@ -519,7 +519,7 @@ install_go_tracer() {
   # Compare the installed version with the required version.
   if ! version_ge "$installed_go_version" "$orchestrion_go_version"; then
       echo "The installed Go version ($installed_go_version) does not meet the required version ($orchestrion_go_version) for orchestrion (tag: $DD_SET_TRACER_VERSION_GO)." >&2
-      echo "Skipping orchestrion installation."
+      echo "Skipping orchestrion installation." >&2
       return 0
   fi
 
