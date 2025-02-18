@@ -386,6 +386,112 @@ install_ruby_tracer() {
   echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
 }
 
+# Function to get the Go version from the go.mod file of a release
+get_orchestrion_go_version() {
+    local input_tag="$1"
+    local tag=""
+
+    # If "latest" is provided, fetch the latest release tag from GitHub API
+    if [ "$input_tag" == "latest" ]; then
+        # Use curl with -sSf to ensure errors are caught and not output to stdout
+        # Use grep and sed to extract the tag_name from the JSON response
+        tag=$(curl -sSf https://api.github.com/repos/datadog/orchestrion/releases/latest \
+              | grep -o '"tag_name": *"[^"]*"' \
+              | head -n 1 \
+              | sed 's/"tag_name": *"\([^"]*\)"/\1/')
+        if [ -z "$tag" ]; then
+            echo "Error: Could not retrieve the latest tag." >&2
+            return 1
+        fi
+    else
+        tag="$input_tag"
+    fi
+
+    # Determine the URL to fetch the go.mod file
+    local url=""
+    # If tag looks like a commit SHA (7 to 40 hexadecimal characters)
+    if [[ "$tag" =~ ^[0-9a-f]{7,40}$ ]]; then
+        url="https://raw.githubusercontent.com/DataDog/orchestrion/${tag}/go.mod"
+    else
+        url="https://raw.githubusercontent.com/DataDog/orchestrion/refs/tags/${tag}/go.mod"
+    fi
+
+    # Fetch the go.mod file content using curl with -sSf
+    local go_mod
+    go_mod=$(curl -sSf "$url")
+    if [ -z "$go_mod" ]; then
+        echo "Error: Could not retrieve go.mod from ${url}" >&2
+        return 1
+    fi
+
+    # Extract the Go version by searching for the line starting with "go "
+    local go_version
+    go_version=$(echo "$go_mod" | grep -m 1 '^go ' | awk '{print $2}')
+    if [ -z "$go_version" ]; then
+        echo "Error: Could not extract the Go version from go.mod" >&2
+        return 1
+    fi
+
+    echo "$go_version"
+}
+
+# Helper function to compare two semantic version numbers.
+# It returns 0 (true) if the first version ($1) is greater than or equal to the second ($2),
+# and returns 1 (false) otherwise.
+version_ge() {
+    # Split version numbers into arrays based on the dot separator
+    IFS='.' read -r -a ver1 <<< "$1"
+    IFS='.' read -r -a ver2 <<< "$2"
+
+    # Determine the maximum length of both version arrays
+    local len=${#ver1[@]}
+    if [ ${#ver2[@]} -gt $len ]; then
+        len=${#ver2[@]}
+    fi
+
+    # Compare each numeric segment of the version
+    for (( i=0; i<len; i++ )); do
+        # Use 0 as default if the segment is missing
+        local num1=${ver1[i]:-0}
+        local num2=${ver2[i]:-0}
+        if (( num1 > num2 )); then
+            return 0  # installed version is greater
+        elif (( num1 < num2 )); then
+            return 1  # installed version is lower
+        fi
+    done
+    # They are equal
+    return 0
+}
+
+# Function to check if the installed Go version meets the requirement.
+# It calls get_go_version with a provided parameter (tag name or "latest"),
+# extracts the installed version from `go version`, and compares both.
+# Returns "true" if installed Go version >= required version, "false" otherwise.
+check_go_version_requirement() {
+    local tag_param="$1"
+    local required_version
+
+    # Get the required Go version from the release go.mod file
+    required_version=$(get_orchestrion_go_version "$tag_param")
+    if [ $? -ne 0 ]; then
+        echo "Error retrieving required version" >&2
+        echo "false"  # Consistently output false in case of error
+        return 0     # Optionally return 0 to indicate successful processing of output
+    fi
+
+    # Extract installed Go version.
+    local installed_version
+    installed_version=$(go version | awk '{print $3}' | sed 's/^go//')
+
+    # Use version_ge to compare the installed and required versions
+    if version_ge "$installed_version" "$required_version"; then
+         echo "true"
+    else
+         echo "false"
+    fi
+}
+
 install_go_tracer() {
   # Check if go is installed
   if ! command -v go >/dev/null 2>&1; then
@@ -395,6 +501,26 @@ install_go_tracer() {
 
   if [ -z "$DD_SET_TRACER_VERSION_GO" ]; then
       DD_SET_TRACER_VERSION_GO=latest
+  fi
+
+  # Try to retrieve the required Go version from orchestrion's go.mod file using the specified tag.
+  local orchestrion_go_version
+  orchestrion_go_version=$(get_orchestrion_go_version "$DD_SET_TRACER_VERSION_GO")
+  if [ $? -ne 0 ] || [ -z "$orchestrion_go_version" ]; then
+      echo "Error: Could not retrieve the required Go version for orchestrion (tag: $DD_SET_TRACER_VERSION_GO)." >&2
+      echo "Skipping orchestrion installation."
+      return 0
+  fi
+
+  # Get the installed Go version (e.g., "1.24.0" from "go version go1.24.0 darwin/arm64")
+  local installed_go_version
+  installed_go_version=$(go version | awk '{print $3}' | sed 's/^go//')
+
+  # Compare the installed version with the required version.
+  if ! version_ge "$installed_go_version" "$orchestrion_go_version"; then
+      echo "The installed Go version ($installed_go_version) does not meet the required version ($orchestrion_go_version) for orchestrion (tag: $DD_SET_TRACER_VERSION_GO)." >&2
+      echo "Skipping orchestrion installation."
+      return 0
   fi
 
   # Install orchestrion using go install
