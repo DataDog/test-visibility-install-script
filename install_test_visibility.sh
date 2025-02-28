@@ -395,7 +395,7 @@ get_orchestrion_go_version() {
     if [ "$input_tag" == "latest" ]; then
         # Use curl with -sSf to ensure errors are caught and not output to stdout
         # Use grep and sed to extract the tag_name from the JSON response
-        tag=$(curl -sSf https://api.github.com/repos/datadog/orchestrion/releases/latest \
+        tag=$(curl -sSf -A "github-action" https://api.github.com/repos/datadog/orchestrion/releases/latest \
               | grep -o '"tag_name": *"[^"]*"' \
               | head -n 1 \
               | sed 's/"tag_name": *"\([^"]*\)"/\1/')
@@ -418,7 +418,7 @@ get_orchestrion_go_version() {
 
     # Fetch the go.mod file content using curl with -sSf
     local go_mod
-    go_mod=$(curl -sSf "$url")
+    go_mod=$(curl -sSf -A "github-action" "$url" || true)
     if [ -z "$go_mod" ]; then
         echo "Error: Could not retrieve go.mod from ${url}" >&2
         return 1
@@ -505,7 +505,7 @@ install_go_tracer() {
 
   # Try to retrieve the required Go version from orchestrion's go.mod file using the specified tag.
   local orchestrion_go_version
-  orchestrion_go_version=$(get_orchestrion_go_version "$DD_SET_TRACER_VERSION_GO")
+  orchestrion_go_version=$(get_orchestrion_go_version "$DD_SET_TRACER_VERSION_GO" || true)
   if [ $? -ne 0 ] || [ -z "$orchestrion_go_version" ]; then
       echo "Error: Could not retrieve the required Go version for orchestrion (tag: $DD_SET_TRACER_VERSION_GO)." >&2
       echo "Skipping orchestrion installation." >&2
