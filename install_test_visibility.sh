@@ -400,8 +400,15 @@ get_orchestrion_go_version() {
               | head -n 1 \
               | sed 's/"tag_name": *"\([^"]*\)"/\1/')
         if [ -z "$tag" ]; then
-            echo "Error: Could not retrieve the latest tag." >&2
-            return 1
+            tag=$(wget -q -O- https://api.github.com/repos/datadog/orchestrion/releases/latest \
+              | grep -o '"tag_name": *"[^"]*"' \
+              | head -n 1 \
+              | sed 's/"tag_name": *"\([^"]*\)"/\1/')
+
+            if [ -z "$tag" ]; then
+                echo "Error: Could not retrieve the latest tag." >&2
+                return 1
+            fi
         fi
     else
         tag="$input_tag"
