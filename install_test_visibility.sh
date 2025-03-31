@@ -307,13 +307,17 @@ is_gem_datadog_version_compliant() {
   fi
 }
 
+datadog_ci_gem_version() {
+  bundle info datadog-ci | head -n 1 | awk -F '[()]' '{print $2}'
+}
+
 is_datadog_ci_version_compliant() {
   if ! is_gem_present "datadog-ci"; then
     return 1
   fi
 
   local datadog_ci_version
-  datadog_ci_version=$(bundle info datadog-ci | head -n 1 | awk -F '[()]' '{print $2}')
+  datadog_ci_version=$(datadog_ci_gem_version)
 
   local major_datadog_ci_version
   local minor_datadog_ci_version
@@ -384,6 +388,7 @@ install_ruby_tracer() {
   fi
 
   echo "RUBYOPT=-rbundler/setup -rdatadog/ci/auto_instrument"
+  echo "DD_TRACER_VERSION_RUBY=$(datadog_ci_gem_version)"
 }
 
 # Function to get the Go version from the go.mod file of a release
