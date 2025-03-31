@@ -287,9 +287,6 @@ is_gem_present() {
   fi
 }
 
-datadog_ci_gem_version() {
-  bundle info datadog | head -n 1 | awk -F '[()]' '{print $2}'
-}
 
 is_gem_datadog_version_compliant() {
   # if there is no datadog gem in the bundle, it's ok, we are going to add it
@@ -298,7 +295,7 @@ is_gem_datadog_version_compliant() {
   fi
 
   local datadog_version
-  datadog_version=$(datadog_ci_gem_version)
+  datadog_version=$(bundle info datadog | head -n 1 | awk -F '[()]' '{print $2}')
 
   local major_datadog_version
   local minor_datadog_version
@@ -311,13 +308,17 @@ is_gem_datadog_version_compliant() {
   fi
 }
 
+datadog_ci_gem_version() {
+  bundle info datadog-ci | head -n 1 | awk -F '[()]' '{print $2}'
+}
+
 is_datadog_ci_version_compliant() {
   if ! is_gem_present "datadog-ci"; then
     return 1
   fi
 
   local datadog_ci_version
-  datadog_ci_version=$(bundle info datadog-ci | head -n 1 | awk -F '[()]' '{print $2}')
+  datadog_ci_version=$(datadog_ci_gem_version)
 
   local major_datadog_ci_version
   local minor_datadog_ci_version
