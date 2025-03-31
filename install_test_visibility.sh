@@ -287,7 +287,6 @@ is_gem_present() {
   fi
 }
 
-
 is_gem_datadog_version_compliant() {
   # if there is no datadog gem in the bundle, it's ok, we are going to add it
   if ! is_gem_present "datadog"; then
