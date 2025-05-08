@@ -190,7 +190,12 @@ install_python_tracer() {
   fi
 
   python -m venv .dd_civis_env >&2
-  source .dd_civis_env/bin/activate >&2
+
+  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+    . .dd_civis_env/Scripts/activate >&2
+  else
+    source .dd_civis_env/bin/activate >&2
+  fi
 
   if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} coverage >&2; then
     >&2 echo "Error: Could not install ddtrace for Python"
