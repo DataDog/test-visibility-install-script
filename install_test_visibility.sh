@@ -542,7 +542,11 @@ resolve_go_module_directory() {
     # For repository roots that do not contain go.mod directly, auto-detect a
     # single nested module. If there is more than one candidate, do not guess.
     local -a go_mod_candidates=()
-    mapfile -t go_mod_candidates < <(
+    # Use a plain read loop instead of `mapfile` so this still works on the
+    # Bash 3.2 shell shipped on macOS GitHub runners.
+    while IFS= read -r go_mod_candidate; do
+        go_mod_candidates+=("$go_mod_candidate")
+    done < <(
         find . \
             \( -path '*/.git' -o -path '*/vendor' -o -path '*/node_modules' \) -prune -o \
             -type f -name go.mod -print \
@@ -655,7 +659,11 @@ select_dd_trace_go_version_for_project() {
     local max_supported_go_version="$2"
 
     local -a available_versions=()
-    mapfile -t available_versions < <(list_stable_dd_trace_go_versions)
+    # Use a plain read loop instead of `mapfile` so this still works on the
+    # Bash 3.2 shell shipped on macOS GitHub runners.
+    while IFS= read -r available_version; do
+        available_versions+=("$available_version")
+    done < <(list_stable_dd_trace_go_versions)
     if [ ${#available_versions[@]} -eq 0 ]; then
         echo "Error: Could not retrieve the list of stable dd-trace-go versions." >&2
         return 1
