@@ -1,0 +1,41 @@
+name: Go Test Matrix
+
+on:
+  pull_request:
+    paths:
+      - install_test_visibility.sh
+      - tests/run_go_matrix.sh
+      - .github/workflows/go-test-matrix.yml
+  push:
+    branches:
+      - main
+      - codex/**
+    paths:
+      - install_test_visibility.sh
+      - tests/run_go_matrix.sh
+      - .github/workflows/go-test-matrix.yml
+  workflow_dispatch:
+
+jobs:
+  go-test-matrix:
+    name: go matrix (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Verify shell syntax
+        run: |
+          bash -n install_test_visibility.sh
+          bash -n tests/run_go_matrix.sh
+          /bin/bash -n tests/run_go_matrix.sh
+
+      - name: Run Go test matrix
+        run: tests/run_go_matrix.sh
