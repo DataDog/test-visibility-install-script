@@ -20,7 +20,7 @@ DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visi
 
 The script parameters are
 
-- `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet`, `ruby` (multiple languages can be specified as a space-separated list).
+- `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet`, `ruby`, `go` (multiple languages can be specified as a space-separated list).
 - `DD_API_KEY`: (required for .NET tracer installation) Datadog API key. Can be found at https://app.datadoghq.com/organization-settings/api-keys
 - `DD_TRACER_FOLDER`: (optional) The folder where the tracing libraries will be installed, defaults to `./.datadog`
 - `DD_SITE`: (optional) Datadog site, defaults to US1. See https://docs.datadoghq.com/getting_started/site for more information about sites.
@@ -30,6 +30,7 @@ The script parameters are
 - `DD_SET_TRACER_VERSION_PYTHON`: (optional) Version of the Python tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_RUBY`: (optional) Version of the Ruby datadog-ci gem to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_GO`: (optional) Version of Orchestrion to install. If not provided, the latest version is installed.
+- `DD_CIVISIBILITY_GO_MODULE_DIR`: (optional) Directory that contains the Go project's `go.mod` file. Use this when the Go module is not at the repository root or when the repository contains multiple Go modules.
 - `DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA`: (optional) A hint for Java instrumentation to instrument a specific build system. Allowed values are `maven`, `gradle`, `sbt`, `ant`, and `all`. If not specified, every Maven, Gradle, SBT, and Ant build will be instrumented. `all` is a special value that allows instrumenting _every JVM process_.
 
 The script will install the libraries and print the list of environment variables that should be set in order to enable Test Optimization. Example output:
