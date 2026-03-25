@@ -396,6 +396,9 @@ install_ruby_tracer() {
   echo "DD_TRACER_VERSION_RUBY=$(datadog_ci_gem_version)"
 }
 
+#
+# Resolve the user-provided orchestrion selector to a single concrete tag so
+# the rest of the installation flow uses one stable orchestrion version.
 resolve_orchestrion_tag() {
     local input_tag="$1"
 
@@ -420,6 +423,9 @@ resolve_orchestrion_tag() {
     echo "$tag"
 }
 
+#
+# Download the requested orchestrion go.mod file from GitHub so later helpers
+# can read the dependency versions that shipped with that release.
 fetch_orchestrion_go_mod() {
     local tag="$1"
     local modfile="${2:-go.mod}"
@@ -490,6 +496,9 @@ get_orchestrion_module_version() {
     echo "$module_version"
 }
 
+#
+# Read the target project's Go directive from go.mod so tracer selection can
+# stay within the Go version the project already declares.
 get_current_project_go_version() {
     local go_mod_path="${1:-go.mod}"
 
@@ -567,6 +576,9 @@ resolve_go_module_directory() {
     return 3
 }
 
+#
+# List the published stable dd-trace-go/v2 releases so the installer can pick
+# the newest compatible tracer without considering prerelease tags.
 list_stable_dd_trace_go_versions() {
     # Query the published v2 module versions and keep only stable x.y.z tags.
     # This intentionally skips rc/dev builds so the script selects the newest
@@ -592,6 +604,9 @@ fetch_dd_trace_go_orchestrion_all_go_mod() {
     echo "$go_mod"
 }
 
+#
+# Read the Go directive from dd-trace-go's orchestrion/all module for a given
+# tracer version so we can check whether that tracer is compatible.
 get_dd_trace_go_orchestrion_all_go_version() {
     local version="$1"
 
@@ -646,6 +661,9 @@ version_ge() {
     return 0
 }
 
+#
+# Return the lower of two semantic versions so tracer selection can use the
+# stricter compatibility ceiling between the project and the runner.
 version_min() {
     if version_ge "$1" "$2"; then
         echo "$2"
@@ -654,6 +672,10 @@ version_min() {
     fi
 }
 
+#
+# Pick the newest stable dd-trace-go release that is not older than the
+# orchestrion-shipped baseline and whose orchestrion/all module still supports
+# the effective Go ceiling for this project and runner.
 select_dd_trace_go_version_for_project() {
     local minimum_version="$1"
     local max_supported_go_version="$2"
