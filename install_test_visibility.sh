@@ -580,12 +580,17 @@ resolve_go_module_directory() {
 # List the published stable dd-trace-go/v2 releases so the installer can pick
 # the newest compatible tracer without considering prerelease tags.
 list_stable_dd_trace_go_versions() {
+    local module_dir="${1:-.}"
+
     # Query the published v2 module versions and keep only stable x.y.z tags.
     # This intentionally skips rc/dev builds so the script selects the newest
     # supported released tracer version instead of a pre-release.
-    go list -m -versions github.com/DataDog/dd-trace-go/v2 2>/dev/null \
-        | awk '{for (i = 2; i <= NF; i++) print $i}' \
-        | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
+    (
+        cd "$module_dir" &&
+        go list -m -versions github.com/DataDog/dd-trace-go/v2 2>/dev/null \
+            | awk '{for (i = 2; i <= NF; i++) print $i}' \
+            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
+    )
 }
 
 fetch_dd_trace_go_orchestrion_all_go_mod() {
@@ -679,13 +684,14 @@ version_min() {
 select_dd_trace_go_version_for_project() {
     local minimum_version="$1"
     local max_supported_go_version="$2"
+    local module_dir="${3:-.}"
 
     local -a available_versions=()
     # Collect the published stable tracer versions into an array using syntax
     # that works on the Bash 3.2 shell shipped on macOS GitHub runners.
     while IFS= read -r available_version; do
         available_versions+=("$available_version")
-    done < <(list_stable_dd_trace_go_versions)
+    done < <(list_stable_dd_trace_go_versions "$module_dir")
     if [ ${#available_versions[@]} -eq 0 ]; then
         echo "Error: Could not retrieve the list of stable dd-trace-go versions." >&2
         return 1
@@ -880,7 +886,7 @@ install_go_tracer() {
       # and its orchestrion/all module must support the effective Go ceiling
       # computed above.
       local compatible_dd_trace_go_version
-      if compatible_dd_trace_go_version=$(select_dd_trace_go_version_for_project "$minimum_dd_trace_go_version" "$max_supported_go_version"); then
+      if compatible_dd_trace_go_version=$(select_dd_trace_go_version_for_project "$minimum_dd_trace_go_version" "$max_supported_go_version" "$go_module_dir"); then
           selected_dd_trace_go_version="$compatible_dd_trace_go_version"
       else
           >&2 echo "Could not find a project-compatible stable dd-trace-go release for Go $max_supported_go_version."
@@ -891,15 +897,17 @@ install_go_tracer() {
       >&2 echo "Falling back to the minimum dd-trace-go version shipped with orchestrion: $minimum_dd_trace_go_version."
   fi
 
-  if ! (cd "$go_module_dir" && go mod edit -require=github.com/DataDog/dd-trace-go/v2@$selected_dd_trace_go_version) >&2; then
-    >&2 echo "Error: Could not pin dd-trace-go for Go to version $selected_dd_trace_go_version."
-    return 1
-  fi
-
   # Install the requested orchestrion CLI version in GOPATH/bin so the later
   # `orchestrion pin` command runs with the same release we just resolved.
   if ! go install github.com/DataDog/orchestrion@$resolved_orchestrion_tag >&2; then
     >&2 echo "Error: Could not install orchestrion for Go."
+    return 1
+  fi
+
+  # Pin dd-trace-go only after the orchestrion CLI is available so install
+  # failures do not leave the customer's go.mod partially updated.
+  if ! (cd "$go_module_dir" && go mod edit -require=github.com/DataDog/dd-trace-go/v2@$selected_dd_trace_go_version) >&2; then
+    >&2 echo "Error: Could not pin dd-trace-go for Go to version $selected_dd_trace_go_version."
     return 1
   fi
 
