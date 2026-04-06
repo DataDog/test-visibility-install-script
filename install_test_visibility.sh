@@ -197,7 +197,7 @@ install_python_tracer() {
     source .dd_civis_env/bin/activate >&2
   fi
 
-  if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} coverage >&2; then
+  if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} coverage==${DD_SET_COVERAGE_VERSION_PYTHON:-7.13.5} >&2; then
     >&2 echo "Error: Could not install ddtrace for Python"
     return 1
   fi
