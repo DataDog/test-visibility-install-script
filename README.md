@@ -28,6 +28,7 @@ The script parameters are
 - `DD_SET_TRACER_VERSION_JAVA`: (optional) Version of the Java tracer to install (without the `v` prefix, e.g. `1.37.1`). If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_JS`: (optional) Version of the JS tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_PYTHON`: (optional) Version of the Python tracer to install. If not provided, the latest version is installed.
+- `DD_SET_COVERAGE_VERSION_PYTHON`: (optional) Version of the Python `coverage` package to install. Defaults to `7.13.5`.
 - `DD_SET_TRACER_VERSION_RUBY`: (optional) Version of the Ruby datadog-ci gem to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_GO`: (optional) Version of Orchestrion to install. If not provided, the latest version is installed.
 - `DD_CIVISIBILITY_GO_MODULE_DIR`: (optional) Directory that contains the Go project's `go.mod` file. Use this when the Go module is not at the repository root or when the repository contains multiple Go modules.
