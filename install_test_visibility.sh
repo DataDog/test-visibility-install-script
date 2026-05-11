@@ -16,6 +16,8 @@ if ! mkdir -p $ARTIFACTS_FOLDER; then
   return 1
 fi
 
+DEFAULT_JAVA_TRACER_REPOSITORY_URL="https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent"
+
 extract_major_version() {
   echo "$1" | cut -d '.' -f 1
 }
@@ -25,6 +27,10 @@ extract_minor_version() {
 }
 
 install_java_tracer() {
+  if ! validate_java_auth_header_configuration; then
+    return 1
+  fi
+
   local repository_base_url
   repository_base_url="$(get_java_tracer_repository_base_url)"
 
@@ -77,6 +83,22 @@ install_java_tracer() {
   echo "DD_TRACER_VERSION_JAVA=$(command -v java >/dev/null 2>&1 && java -jar $filepath_tracer || unzip -p $filepath_tracer META-INF/MANIFEST.MF | grep -i implementation-version | cut -d' ' -f2)"
 }
 
+validate_java_auth_header_configuration() {
+  if [ -n "${DD_SET_AUTH_HEADER_JAVA:-}" ] && [ -z "${DD_SET_TRACER_REPOSITORY_URL_JAVA:-}" ]; then
+    >&2 echo "Error: DD_SET_AUTH_HEADER_JAVA requires DD_SET_TRACER_REPOSITORY_URL_JAVA to be set to a custom repository URL."
+    return 1
+  fi
+
+  if [ -n "${DD_SET_AUTH_HEADER_JAVA:-}" ]; then
+    local repository_base_url
+    repository_base_url="$(normalize_java_tracer_repository_base_url "$DD_SET_TRACER_REPOSITORY_URL_JAVA")"
+    if [ "$repository_base_url" = "$DEFAULT_JAVA_TRACER_REPOSITORY_URL" ]; then
+      >&2 echo "Error: DD_SET_AUTH_HEADER_JAVA cannot be used with the default Maven Central repository. Set DD_SET_TRACER_REPOSITORY_URL_JAVA to a custom repository URL."
+      return 1
+    fi
+  fi
+}
+
 verify_checksum() {
   if command -v sha256sum >/dev/null 2>&1; then
     if ! echo "$1 $2" | sha256sum --quiet -c -; then
@@ -93,7 +115,12 @@ verify_checksum() {
 }
 
 get_java_tracer_repository_base_url() {
-  local base_url="${DD_SET_TRACER_REPOSITORY_URL_JAVA:-https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent}"
+  local base_url="${DD_SET_TRACER_REPOSITORY_URL_JAVA:-$DEFAULT_JAVA_TRACER_REPOSITORY_URL}"
+  normalize_java_tracer_repository_base_url "$base_url"
+}
+
+normalize_java_tracer_repository_base_url() {
+  local base_url="$1"
   # Trim trailing slashes so callers can append "/<version>/..." uniformly
   # regardless of whether the override was provided with or without one.
   while [ "${base_url%/}" != "$base_url" ]; do
