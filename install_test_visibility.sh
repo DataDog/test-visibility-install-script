@@ -25,8 +25,11 @@ extract_minor_version() {
 }
 
 install_java_tracer() {
+  local repository_base_url
+  repository_base_url="$(get_java_tracer_repository_base_url)"
+
   if [ -z "$DD_SET_TRACER_VERSION_JAVA" ]; then
-      DD_SET_TRACER_VERSION_JAVA=$(get_latest_java_tracer_version)
+      DD_SET_TRACER_VERSION_JAVA=$(get_latest_java_tracer_version "$repository_base_url")
   fi
 
   local filepath_tracer
@@ -34,8 +37,8 @@ install_java_tracer() {
   local filepath_checksum
   filepath_checksum="$ARTIFACTS_FOLDER/dd-java-agent.jar.sha256"
 
-  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar" $filepath_tracer
-  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar.sha256" $filepath_checksum
+  download_file "$repository_base_url/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar" "$filepath_tracer" "${DD_SET_AUTH_HEADER_JAVA:-}"
+  download_file "$repository_base_url/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar.sha256" "$filepath_checksum" "${DD_SET_AUTH_HEADER_JAVA:-}"
 
   if ! verify_checksum "$(cat $filepath_checksum)" "$filepath_tracer"; then
     return 1
@@ -89,14 +92,26 @@ verify_checksum() {
   fi
 }
 
+get_java_tracer_repository_base_url() {
+  local base_url="${DD_SET_TRACER_REPOSITORY_URL_JAVA:-https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent}"
+  # Trim trailing slashes so callers can append "/<version>/..." uniformly
+  # regardless of whether the override was provided with or without one.
+  while [ "${base_url%/}" != "$base_url" ]; do
+    base_url="${base_url%/}"
+  done
+  echo "$base_url"
+}
+
 get_latest_java_tracer_version() {
+  local repository_base_url="$1"
+
   local filepath_metadata
   filepath_metadata="$ARTIFACTS_FOLDER/maven-metadata.xml"
   local filepath_checksum
   filepath_checksum="$ARTIFACTS_FOLDER/maven-metadata.xml.sha256"
 
-  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/maven-metadata.xml" $filepath_metadata
-  download_file "https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent/maven-metadata.xml.sha256" $filepath_checksum
+  download_file "$repository_base_url/maven-metadata.xml" "$filepath_metadata" "${DD_SET_AUTH_HEADER_JAVA:-}"
+  download_file "$repository_base_url/maven-metadata.xml.sha256" "$filepath_checksum" "${DD_SET_AUTH_HEADER_JAVA:-}"
 
   if ! verify_checksum "$(cat $filepath_checksum)" "$filepath_metadata"; then
     return 1
@@ -113,10 +128,19 @@ get_latest_java_tracer_version() {
 download_file() {
   local url=$1
   local filepath=$2
+  local auth_header="${3:-}"
   if command -v curl >/dev/null 2>&1; then
-    curl -Lo "$filepath" "$url"
+    if [ -n "$auth_header" ]; then
+      curl -Lo "$filepath" -H "$auth_header" "$url"
+    else
+      curl -Lo "$filepath" "$url"
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -O "$filepath" "$url"
+    if [ -n "$auth_header" ]; then
+      wget -O "$filepath" --header="$auth_header" "$url"
+    else
+      wget -O "$filepath" "$url"
+    fi
   else
     >&2 echo "Error: Neither wget nor curl is installed."
     return 1
