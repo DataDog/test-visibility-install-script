@@ -21,11 +21,13 @@ DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visi
 The script parameters are
 
 - `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet`, `ruby`, `go` (multiple languages can be specified as a space-separated list).
-- `DD_API_KEY`: (required for .NET tracer installation) Datadog API key. Can be found at https://app.datadoghq.com/organization-settings/api-keys
+- `DD_API_KEY`: (required for .NET tracer installation) Datadog API key. Can be found at <https://app.datadoghq.com/organization-settings/api-keys>
 - `DD_TRACER_FOLDER`: (optional) The folder where the tracing libraries will be installed, defaults to `./.datadog`
-- `DD_SITE`: (optional) Datadog site, defaults to US1. See https://docs.datadoghq.com/getting_started/site for more information about sites.
+- `DD_SITE`: (optional) Datadog site, defaults to US1. See <https://docs.datadoghq.com/getting_started/site> for more information about sites.
 - `DD_SET_TRACER_VERSION_DOTNET`: (optional) Version of the .NET tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_JAVA`: (optional) Version of the Java tracer to install (without the `v` prefix, e.g. `1.37.1`). If not provided, the latest version is installed.
+- `DD_SET_TRACER_REPOSITORY_URL_JAVA`: (optional) Base URL of a Maven repository (or proxy/mirror) used to download the Java tracer JAR and its `.sha256`. The path under the base must follow the standard Maven layout for `com.datadoghq:dd-java-agent` (i.e. `<base>/<version>/dd-java-agent-<version>.jar`, plus `<base>/maven-metadata.xml` when `DD_SET_TRACER_VERSION_JAVA` is not pinned). Trailing slashes are tolerated. Defaults to `https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent`.
+- `DD_SET_AUTH_HEADER_JAVA`: (optional) HTTP header used to authenticate against `DD_SET_TRACER_REPOSITORY_URL_JAVA`, provided as a complete `Name: Value` string (e.g. `Authorization: Bearer <token>`). Passed verbatim to `curl -H` / `wget --header` on every Java tracer download. Requires `DD_SET_TRACER_REPOSITORY_URL_JAVA` to be set to a custom repository URL. Redirects are not followed when this option is set, to avoid forwarding credentials to another location; configure `DD_SET_TRACER_REPOSITORY_URL_JAVA` as the final repository URL.
 - `DD_SET_TRACER_VERSION_JS`: (optional) Version of the JS tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_PYTHON`: (optional) Version of the Python tracer to install. If not provided, the latest version is installed.
 - `DD_SET_COVERAGE_VERSION_PYTHON`: (optional) Version of the Python `coverage` package to install. Defaults to `7.13.5`.
