@@ -158,13 +158,15 @@ download_file() {
   local auth_header="${3:-}"
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
-      curl -Lo "$filepath" -H "$auth_header" "$url"
+      # Do not follow redirects while sending a caller-provided secret header.
+      curl -Lo "$filepath" --max-redirs 0 -H "$auth_header" "$url"
     else
       curl -Lo "$filepath" "$url"
     fi
   elif command -v wget >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
-      wget -O "$filepath" --header="$auth_header" "$url"
+      # Do not follow redirects while sending a caller-provided secret header.
+      wget --max-redirect=0 -O "$filepath" --header="$auth_header" "$url"
     else
       wget -O "$filepath" "$url"
     fi
