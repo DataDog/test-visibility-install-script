@@ -156,17 +156,24 @@ download_file() {
   local url=$1
   local filepath=$2
   local auth_header="${3:-}"
+  local disable_redirects="${DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS:-}"
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
-      # Do not follow redirects while sending a caller-provided secret header.
-      curl -fLo "$filepath" --max-redirs 0 -H "$auth_header" "$url"
+      if [ -n "$disable_redirects" ]; then
+        curl -fLo "$filepath" --max-redirs 0 -H "$auth_header" "$url"
+      else
+        curl -fLo "$filepath" -H "$auth_header" "$url"
+      fi
     else
       curl -fLo "$filepath" "$url"
     fi
   elif command -v wget >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
-      # Do not follow redirects while sending a caller-provided secret header.
-      wget --max-redirect=0 -O "$filepath" --header="$auth_header" "$url"
+      if [ -n "$disable_redirects" ]; then
+        wget --max-redirect=0 -O "$filepath" --header="$auth_header" "$url"
+      else
+        wget -O "$filepath" --header="$auth_header" "$url"
+      fi
     else
       wget -O "$filepath" "$url"
     fi
