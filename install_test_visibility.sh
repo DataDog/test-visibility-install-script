@@ -243,13 +243,17 @@ is_github_actions() {
   fi
 }
 
-install_python_tracer() {
-  if ! command -v pip >/dev/null 2>&1; then
-    >&2 echo "Error: pip is not installed."
+install_python_tracer() (
+  # Keep the caller's interpreter and environment intact even on failure.
+  if ! command -v python >/dev/null 2>&1; then
+    >&2 echo "Error: python is not installed."
     return 1
   fi
 
-  python -m venv .dd_civis_env >&2
+  if ! python -m venv .dd_civis_env >&2; then
+    >&2 echo "Error: Could not create the Python instrumentation environment."
+    return 1
+  fi
 
   if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
     . .dd_civis_env/Scripts/activate >&2
@@ -257,21 +261,39 @@ install_python_tracer() {
     source .dd_civis_env/bin/activate >&2
   fi
 
-  if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} coverage==${DD_SET_COVERAGE_VERSION_PYTHON:-7.13.5} >&2; then
-    >&2 echo "Error: Could not install ddtrace for Python"
+  local python_version coverage_version tracer_requirement
+  python_version=$(python -c 'import platform; print(platform.python_version())')
+  coverage_version="${DD_SET_COVERAGE_VERSION_PYTHON:-}"
+  if [ -z "$coverage_version" ]; then
+    case "$python_version" in
+      # coverage 7.11 dropped Python 3.9. Keep the final compatible release
+      # pinned rather than resolving a moving range on every installation.
+      3.9.*) coverage_version="7.10.7" ;;
+      *) coverage_version="${DD_DEFAULT_COVERAGE_VERSION_PYTHON:-7.13.5}" ;;
+    esac
+  fi
+  tracer_requirement="ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON}"
+
+  # Separate failures so an incompatible coverage pin is not blamed on ddtrace.
+  if ! python -m pip install -U "$tracer_requirement" >&2; then
+    >&2 echo "Error: Could not install $tracer_requirement for Python $python_version. See pip diagnostics above."
+    return 1
+  fi
+  if ! python -m pip install -U "coverage==$coverage_version" >&2; then
+    >&2 echo "Error: Could not install coverage==$coverage_version for Python $python_version. See pip diagnostics above."
     return 1
   fi
 
   local dd_trace_path
-  dd_trace_path=$(pip show ddtrace | grep Location | awk '{print $2}')
-  if ! [ -d $dd_trace_path ]; then
+  dd_trace_path=$(python -m pip show ddtrace | sed -n 's/^Location: //p')
+  if ! [ -d "$dd_trace_path" ]; then
     >&2 echo "Error: Could not determine ddtrace package location (tried $dd_trace_path)"
     return 1
   fi
 
   local coverage_path
-  coverage_path=$(pip show coverage | grep Location | awk '{print $2}')
-  if ! [ -d $coverage_path ]; then
+  coverage_path=$(python -m pip show coverage | sed -n 's/^Location: //p')
+  if ! [ -d "$coverage_path" ]; then
     >&2 echo "Error: Could not determine coverage package location (tried $coverage_path)"
     return 1
   fi
@@ -279,10 +301,11 @@ install_python_tracer() {
   echo "PYTHONPATH=$dd_trace_path:$coverage_path:$PYTHONPATH"
   echo "PYTEST_ADDOPTS=--ddtrace $PYTEST_ADDOPTS"
 
-  echo "DD_TRACER_VERSION_PYTHON=$(pip show ddtrace | grep Version | cut -d ' ' -f2)"
+  echo "DD_TRACER_VERSION_PYTHON=$(python -m pip show ddtrace | sed -n 's/^Version: //p')"
+  echo "DD_COVERAGE_VERSION_PYTHON=$coverage_version"
 
   deactivate >&2
-}
+)
 
 install_dotnet_tracer() {
   if ! command -v dotnet >/dev/null 2>&1; then
@@ -998,14 +1021,6 @@ install_go_tracer() {
   echo "DD_TRACER_VERSION_GO=${orchestrion_version}"
 }
 
-# set common environment variables
-echo "DD_CIVISIBILITY_ENABLED=true"
-echo "DD_CIVISIBILITY_AGENTLESS_ENABLED=true"
-
-if [ -z "$DD_ENV" ]; then
-  echo "DD_ENV=ci"
-fi
-
 # install tracer libraries
 if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
   if [ "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" = "all" ]; then
@@ -1042,4 +1057,12 @@ if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
 else
   >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby, go"
   exit 1;
+fi
+
+# Enable instrumentation only after all requested libraries were installed.
+echo "DD_CIVISIBILITY_ENABLED=true"
+echo "DD_CIVISIBILITY_AGENTLESS_ENABLED=true"
+
+if [ -z "$DD_ENV" ]; then
+  echo "DD_ENV=ci"
 fi
