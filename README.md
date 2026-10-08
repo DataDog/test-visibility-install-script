@@ -31,7 +31,6 @@ The script parameters are
 - `DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS`: (optional) When set to any non-empty value, disables HTTP redirect following for Java tracer downloads that send `DD_SET_AUTH_HEADER_JAVA`. Use this if your repository never redirects and you want to guarantee the auth header is only ever sent to the configured `DD_SET_TRACER_REPOSITORY_URL_JAVA` host.
 - `DD_SET_TRACER_VERSION_JS`: (optional) Version of the JS tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_PYTHON`: (optional) Version of the Python tracer to install. If not provided, the latest version is installed.
-- `DD_SET_COVERAGE_VERSION_PYTHON`: (optional) Version of the Python `coverage` package to install. Defaults to `7.13.5`.
 - `DD_SET_TRACER_VERSION_RUBY`: (optional) Version of the Ruby datadog-ci gem to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_GO`: (optional) Version of Orchestrion to install. If not provided, the latest version is installed.
 - `DD_CIVISIBILITY_GO_MODULE_DIR`: (optional) Directory that contains the Go project's `go.mod` file. Use this when the Go module is not at the repository root or when the repository contains multiple Go modules.

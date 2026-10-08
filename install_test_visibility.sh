@@ -257,7 +257,7 @@ install_python_tracer() {
     source .dd_civis_env/bin/activate >&2
   fi
 
-  if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} coverage==${DD_SET_COVERAGE_VERSION_PYTHON:-7.13.5} >&2; then
+  if ! pip install -U ddtrace${DD_SET_TRACER_VERSION_PYTHON:+==$DD_SET_TRACER_VERSION_PYTHON} >&2; then
     >&2 echo "Error: Could not install ddtrace for Python"
     return 1
   fi
@@ -269,14 +269,7 @@ install_python_tracer() {
     return 1
   fi
 
-  local coverage_path
-  coverage_path=$(pip show coverage | grep Location | awk '{print $2}')
-  if ! [ -d $coverage_path ]; then
-    >&2 echo "Error: Could not determine coverage package location (tried $coverage_path)"
-    return 1
-  fi
-
-  echo "PYTHONPATH=$dd_trace_path:$coverage_path:$PYTHONPATH"
+  echo "PYTHONPATH=$dd_trace_path:$PYTHONPATH"
   echo "PYTEST_ADDOPTS=--ddtrace $PYTEST_ADDOPTS"
 
   echo "DD_TRACER_VERSION_PYTHON=$(pip show ddtrace | grep Version | cut -d ' ' -f2)"
