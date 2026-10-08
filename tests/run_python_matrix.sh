@@ -108,6 +108,22 @@ esac
 EOF
   chmod +x "$CURRENT_CASE_DIR/bin/python"
 
+  cat > "$CURRENT_CASE_DIR/bin/bash" <<'EOF'
+#!/bin/bash
+# Delegate to the real bash so scenarios running with a fully restricted PATH
+# can still invoke the install script itself.
+exec /bin/bash "$@"
+EOF
+  chmod +x "$CURRENT_CASE_DIR/bin/bash"
+
+  cat > "$CURRENT_CASE_DIR/bin/mkdir" <<'EOF'
+#!/bin/bash
+# Delegate to the real mkdir so scenarios running with a fully restricted
+# PATH (only this bin directory) still let the install script create folders.
+exec /bin/mkdir "$@"
+EOF
+  chmod +x "$CURRENT_CASE_DIR/bin/mkdir"
+
   cat > "$CURRENT_CASE_DIR/bin/pip" <<'EOF'
 #!/bin/bash
 set -euo pipefail
@@ -159,14 +175,18 @@ run_install_script() {
   LAST_STDERR="$CURRENT_CASE_DIR/stderr.txt"
 
   # Keep the PATH fully controlled by the harness when a scenario needs to
-  # simulate a missing tool (e.g. no pip anywhere on the system). The flag is
-  # read from the scenario arguments because those are plain strings, not
-  # environment variables, at this point.
+  # simulate a missing tool (e.g. no pip anywhere on the system): the PATH
+  # contains ONLY the fake toolchain bin directory, so no system tool (pip
+  # included, e.g. /usr/bin/pip on GitHub ubuntu runners) can leak in. The
+  # fake toolchain provides every command the script needs on that path
+  # (python and a delegating mkdir). The flag is read from the scenario
+  # arguments because those are plain strings, not environment variables,
+  # at this point.
   local effective_path="$CURRENT_CASE_DIR/bin:$PATH"
   local arg
   for arg in "$@"; do
     if [ "$arg" = "FAKE_RESTRICTED_PATH=1" ]; then
-      effective_path="$CURRENT_CASE_DIR/bin:/bin"
+      effective_path="$CURRENT_CASE_DIR/bin"
     fi
   done
 
