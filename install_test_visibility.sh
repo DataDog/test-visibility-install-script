@@ -215,9 +215,18 @@ install_js_tracer() {
     return 1
   fi
 
+  # npm puts global packages in lib/node_modules under the prefix, but in
+  # node_modules on Windows, where it also prints the native path that Node
+  # needs instead of Git Bash's POSIX one.
+  local global_node_modules
+  if ! global_node_modules=$(npm root -g); then
+    >&2 echo "Error: Could not find the folder of global npm packages"
+    return 1
+  fi
+
   # Github Actions prohibit setting NODE_OPTIONS
-  local dd_trace_ci_init_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/ci/init"
-  local dd_trace_register_path="$ARTIFACTS_FOLDER/lib/node_modules/dd-trace/register.js"
+  local dd_trace_ci_init_path="$global_node_modules/dd-trace/ci/init"
+  local dd_trace_register_path="$global_node_modules/dd-trace/register.js"
   if ! is_github_actions; then
     echo "NODE_OPTIONS=$NODE_OPTIONS -r $dd_trace_ci_init_path"
   else
@@ -275,7 +284,13 @@ install_python_tracer() {
     return 1
   fi
 
-  echo "PYTHONPATH=$dd_trace_path:$PYTHONPATH"
+  # Python on Windows separates PYTHONPATH entries with ';', and pip prints
+  # the native path there.
+  local python_path_separator=":"
+  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+    python_path_separator=";"
+  fi
+  echo "PYTHONPATH=$dd_trace_path$python_path_separator$PYTHONPATH"
   echo "PYTEST_ADDOPTS=--ddtrace $PYTEST_ADDOPTS"
 
   echo "DD_TRACER_VERSION_PYTHON=$(pip show ddtrace | grep Version | cut -d ' ' -f2)"

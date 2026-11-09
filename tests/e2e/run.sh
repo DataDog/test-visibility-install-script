@@ -242,11 +242,16 @@ run_tests() {
   # shellcheck disable=SC2064
   trap "kill $intake_pid 2>/dev/null || true" EXIT
   local _
-  for _ in $(seq 1 100); do
+  for _ in $(seq 1 300); do
     [ -s "$intake_dir/port" ] && break
     sleep 0.1
   done
-  [ -s "$intake_dir/port" ] || fail "the intake did not start"
+  if [ ! -s "$intake_dir/port" ]; then
+    echo "--- intake: $(command -v "$python_bin") ($("$python_bin" --version 2>&1))" >&2
+    kill -0 "$intake_pid" 2>/dev/null && echo "--- the intake is still running" >&2 || echo "--- the intake exited" >&2
+    cat "$intake_dir/intake.out" >&2 2>/dev/null || true
+    fail "the intake did not start"
+  fi
   DD_CIVISIBILITY_AGENTLESS_URL="http://127.0.0.1:$(cat "$intake_dir/port")"
   export DD_CIVISIBILITY_AGENTLESS_URL
 
