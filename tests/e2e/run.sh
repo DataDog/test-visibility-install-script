@@ -272,6 +272,15 @@ run_tests() {
     fail "the test's event did not reach the intake"
   fi
 
+  if [ "$language" = "js" ]; then
+    # The README has vitest users pass DD_TRACE_ESM_IMPORT to Node's --import,
+    # which needs a URL or a path that Node can resolve on every OS.
+    if ! node --import="$DD_TRACE_ESM_IMPORT" -e '' > "$test_log" 2>&1; then
+      cat "$test_log" >&2
+      fail "Node cannot --import DD_TRACE_ESM_IMPORT=$DD_TRACE_ESM_IMPORT"
+    fi
+  fi
+
   if [ "$language" = "go" ]; then
     # go test keeps its own exit status through ddtest's go.
     if E2E_FAIL=1 go test -count=1 ./... > "$test_log" 2>&1; then

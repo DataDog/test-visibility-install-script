@@ -232,6 +232,14 @@ install_js_tracer() {
   else
     echo "DD_TRACE_PACKAGE=$dd_trace_ci_init_path"
   fi
+  # Node's --import takes a URL or a specifier, and reads a Windows path such
+  # as D:\a\register.js as a URL with the scheme d:, so Windows gets a file URL.
+  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+    if ! dd_trace_register_path=$(node -e 'console.log(require("url").pathToFileURL(process.argv[1]).href)' "$dd_trace_register_path"); then
+      >&2 echo "Error: Could not build the file URL of $dd_trace_register_path"
+      return 1
+    fi
+  fi
   # We can't set the --import flag directly in NODE_OPTIONS since it's only compatible from Node.js>=20.6.0 and Node.js>=18.19,
   # not even if !is_github_actions.
   # Additionally, it's not useful for test frameworks other than vitest, which is ESM first.
@@ -572,21 +580,16 @@ install_go_tracer() {
   # that names no ddtest release with ddtest instrument, such as an earlier
   # Orchestrion pin, cannot be honored: the latest ddtest is installed instead,
   # with a warning, so the job keeps Go instrumented.
+  local unusable_version_warning="Warning: DD_SET_TRACER_VERSION_GO=$DD_SET_TRACER_VERSION_GO is not a ddtest release from $DDTEST_MINIMUM_VERSION on; ddtest replaced Orchestrion for Go. Installing the latest ddtest release."
   local ddtest_version="${DD_SET_TRACER_VERSION_GO:-latest}"
   if [ "$ddtest_version" != "latest" ]; then
     if [[ "$ddtest_version" =~ ^[0-9] ]]; then
       ddtest_version="v$ddtest_version"
     fi
     if ! [[ "$ddtest_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! version_ge "$ddtest_version" "$DDTEST_MINIMUM_VERSION"; then
-      >&2 echo "Warning: DD_SET_TRACER_VERSION_GO=$DD_SET_TRACER_VERSION_GO is not a ddtest release from $DDTEST_MINIMUM_VERSION on; ddtest replaced Orchestrion for Go. Installing the latest ddtest release."
+      >&2 echo "$unusable_version_warning"
       ddtest_version="latest"
     fi
-  fi
-  local download_url
-  if [ "$ddtest_version" = "latest" ]; then
-    download_url="$DDTEST_RELEASES_URL/latest/download"
-  else
-    download_url="$DDTEST_RELEASES_URL/download/$ddtest_version"
   fi
 
   local filepath_ddtest
@@ -597,7 +600,28 @@ install_go_tracer() {
   local filepath_checksums
   filepath_checksums="$ARTIFACTS_FOLDER/ddtest.SHA256SUMS"
 
-  if ! download_file "$download_url/SHA256SUMS" "$filepath_checksums" >&2; then
+  local download_url
+  local download_status
+  while true; do
+    if [ "$ddtest_version" = "latest" ]; then
+      download_url="$DDTEST_RELEASES_URL/latest/download"
+    else
+      download_url="$DDTEST_RELEASES_URL/download/$ddtest_version"
+    fi
+    download_status=0
+    download_file "$download_url/SHA256SUMS" "$filepath_checksums" >&2 || download_status=$?
+    # The server answered with an error, 22 from curl -f or 8 from wget, for a
+    # pinned release: the release does not exist, as with a version number
+    # that ddtest never published, so the latest ddtest is installed instead.
+    # Network failures stay errors.
+    if [ "$ddtest_version" != "latest" ] && { [ $download_status -eq 22 ] || [ $download_status -eq 8 ]; }; then
+      >&2 echo "$unusable_version_warning"
+      ddtest_version="latest"
+      continue
+    fi
+    break
+  done
+  if [ $download_status -ne 0 ]; then
     rm -f "$filepath_checksums"
     >&2 echo "Error: Could not download $download_url/SHA256SUMS."
     return 1

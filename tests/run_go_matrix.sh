@@ -173,7 +173,12 @@ url="${@: -1}"
 output="${@: -2:1}"
 printf '%s\n' "$url" >> "$FAKE_LOG_DIR/curl.log"
 
+# curl -f exits 22 when the server answers with an error, such as 404 for a
+# release that does not exist, and with other codes when the network fails.
 if [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ]; then
+  exit "${FAKE_DOWNLOAD_EXIT:-22}"
+fi
+if [ -n "${FAKE_MISSING_RELEASE:-}" ] && [[ "$url" == */download/"$FAKE_MISSING_RELEASE"/* ]]; then
   exit 22
 fi
 
@@ -613,11 +618,40 @@ scenario_windows_github_actions() {
   assert_file_not_contains "$LAST_STDOUT" "PATH="
 }
 
+# Validate that a pinned release that ddtest never published installs the
+# latest ddtest with a warning.
+scenario_missing_release_installs_latest() {
+  prepare_case "missing_release_installs_latest"
+
+  run_install_script DD_SET_TRACER_VERSION_GO=v1.99.0 FAKE_MISSING_RELEASE=v1.99.0
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDERR" "Warning: DD_SET_TRACER_VERSION_GO=v1.99.0 is not a ddtest release from v1.14.0 on"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/download/v1.99.0/SHA256SUMS"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that a network failure for a pinned release stays an error instead
+# of installing another release.
+scenario_pinned_release_network_failure() {
+  prepare_case "pinned_release_network_failure"
+
+  run_install_script DD_SET_TRACER_VERSION_GO=v1.16.0 FAKE_FAIL_DOWNLOADS=1 FAKE_DOWNLOAD_EXIT=7
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/latest/"
+  assert_go_not_instrumented
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
   run_case "release_before_instrument_installs_latest" scenario_release_before_instrument_installs_latest
   run_case "commit_version_installs_latest" scenario_commit_version_installs_latest
+  run_case "missing_release_installs_latest" scenario_missing_release_installs_latest
+  run_case "pinned_release_network_failure" scenario_pinned_release_network_failure
   run_case "runner_go_below_minimum" scenario_runner_go_below_minimum
   run_case "unsupported_platform" scenario_unsupported_platform
   run_case "checksum_mismatch" scenario_checksum_mismatch
