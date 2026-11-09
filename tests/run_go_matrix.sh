@@ -702,6 +702,53 @@ scenario_wget_missing_release_installs_latest() {
   assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
 }
 
+# Put a sha256sum like BusyBox's, on Alpine images, first on PATH: it computes
+# digests as usual but rejects long options such as --quiet.
+use_busybox_sha256sum() {
+  local real_sha256sum
+  real_sha256sum="$(command -v sha256sum || true)"
+  cat > "$CURRENT_CASE_DIR/bin/sha256sum" <<EOF_SHA
+#!/bin/bash
+for argument in "\$@"; do
+  case "\$argument" in
+    --*) echo "sha256sum: unrecognized option: \${argument#--}" >&2; exit 1 ;;
+  esac
+done
+if [ -n "$real_sha256sum" ]; then
+  exec "$real_sha256sum" "\$@"
+fi
+exec shasum -a 256 "\$@"
+EOF_SHA
+  chmod +x "$CURRENT_CASE_DIR/bin/sha256sum"
+}
+
+# Validate that BusyBox's sha256sum, which rejects --quiet, verifies ddtest.
+scenario_busybox_sha256sum() {
+  prepare_case "busybox_sha256sum"
+  use_busybox_sha256sum
+
+  run_install_script
+
+  assert_exit_code 0
+  assert_file_exists "$CURRENT_WORKSPACE/.datadog/ddtest"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that BusyBox's sha256sum still rejects a download that does not
+# match SHA256SUMS.
+scenario_busybox_sha256sum_mismatch() {
+  prepare_case "busybox_sha256sum_mismatch"
+  use_busybox_sha256sum
+  install_previous_ddtest
+
+  run_install_script FAKE_BAD_CHECKSUM=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "ddtest-linux-amd64 does not match the checksum in the ddtest release."
+  assert_previous_ddtest_kept
+  assert_go_not_instrumented
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -711,6 +758,8 @@ main() {
   run_case "pinned_release_network_failure" scenario_pinned_release_network_failure
   run_case "pinned_release_unparseable_reply" scenario_pinned_release_unparseable_reply
   run_case "wget_missing_release_installs_latest" scenario_wget_missing_release_installs_latest
+  run_case "busybox_sha256sum" scenario_busybox_sha256sum
+  run_case "busybox_sha256sum_mismatch" scenario_busybox_sha256sum_mismatch
   run_case "runner_go_below_minimum" scenario_runner_go_below_minimum
   run_case "unsupported_platform" scenario_unsupported_platform
   run_case "checksum_mismatch" scenario_checksum_mismatch

@@ -105,17 +105,23 @@ validate_java_auth_header_configuration() {
   fi
 }
 
+# Succeed when the SHA-256 digest of file $2 is $1. The digest is computed and
+# compared here rather than with sha256sum -c, whose options differ: BusyBox's,
+# on Alpine images, rejects --quiet.
 verify_checksum() {
+  local actual
   if command -v sha256sum >/dev/null 2>&1; then
-    if ! echo "$1 $2" | sha256sum --quiet -c -; then
-      return 1
-    fi
+    actual=$(sha256sum < "$2" | cut -d ' ' -f 1)
   elif command -v shasum >/dev/null 2>&1; then
-    if ! echo "$1  $2" | shasum --quiet -a 256 -c -; then
-      return 1
-    fi
+    actual=$(shasum -a 256 < "$2" | cut -d ' ' -f 1)
   else
     >&2 echo "Error: Neither sha256sum nor shasum is installed."
+    return 1
+  fi
+  local expected
+  expected=$(echo "$1" | awk '{ print tolower($1) }')
+  if [ -z "$actual" ] || [ "$actual" != "$expected" ]; then
+    >&2 echo "$2: computed checksum does not match $expected"
     return 1
   fi
 }
