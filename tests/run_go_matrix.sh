@@ -1,8 +1,9 @@
 #!/bin/bash
 
 # This harness validates the Go installation decision matrix by running the
-# install script against fake go/curl/orchestrion binaries. That keeps the
-# tests deterministic while still exercising the full shell control flow.
+# install script against fake curl, go and uname commands and a fake ddtest
+# release. That keeps the tests deterministic while still exercising the full
+# shell control flow. tests/run_go_smoke.sh runs the real ddtest.
 
 set -euo pipefail
 
@@ -92,208 +93,158 @@ assert_files_equal() {
 }
 
 # Write a simple go.mod file that includes a go directive.
+# Print the SHA-256 digest of a file.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 < "$1" | cut -d ' ' -f 1
+  fi
+}
+
+# Write a simple go.mod file that includes a go directive.
 write_go_mod() {
   local file_path="$1"
   local module_name="$2"
   local go_version="$3"
-  cat > "$file_path" <<EOF
+  cat > "$file_path" <<MOD
 module $module_name
 
 go $go_version
-EOF
+MOD
 }
 
-# Write a simple go.mod file without a go directive.
-write_go_mod_without_go_directive() {
-  local file_path="$1"
-  local module_name="$2"
-  cat > "$file_path" <<EOF
-module $module_name
-EOF
-}
-
-# Create the fake toolchain used by one matrix scenario.
+# Create the fake commands and the fake ddtest release used by one scenario.
+# Scenarios run as a linux/amd64 host unless they fake uname, so the release
+# has ddtest-linux-amd64 and, for Windows, the same fake as
+# ddtest-windows-amd64.exe.
 create_fake_toolchain() {
-  mkdir -p "$CURRENT_CASE_DIR/bin" "$CURRENT_CASE_DIR/logs"
+  mkdir -p "$CURRENT_CASE_DIR/bin" "$CURRENT_CASE_DIR/logs" "$CURRENT_CASE_DIR/release"
 
-  cat > "$CURRENT_CASE_DIR/bin/curl" <<'EOF'
+  # The fake ddtest runs commands as ddtest instrument does: every run takes
+  # the go shim off PATH, and --go-shim puts it first for its command, unless
+  # the shim cannot be set up, when ddtest warns and runs the command without it.
+  cat > "$CURRENT_CASE_DIR/release/ddtest-linux-amd64" <<'DDTEST'
 #!/bin/bash
 set -euo pipefail
 
-url="${@: -1}"
+if [ "${1:-}" = "--version" ]; then
+  echo "${FAKE_DDTEST_VERSION:-v1.16.0}"
+  exit 0
+fi
+if [ "${1:-}" != "instrument" ]; then
+  echo "Unsupported fake ddtest command: ddtest $*" >&2
+  exit 2
+fi
+shift
 
-if [[ "$url" == *"/repos/datadog/orchestrion/releases/latest" ]]; then
-  counter_file="$FAKE_LOG_DIR/latest_requests.count"
-  count=0
-  if [ -f "$counter_file" ]; then
-    count="$(cat "$counter_file")"
+kept=""
+IFS=: read -r -a entries <<< "$PATH"
+for entry in "${entries[@]}"; do
+  if [ "$entry" != "$FAKE_GO_SHIM_DIR" ]; then
+    kept="${kept:+$kept:}$entry"
   fi
-  count=$((count + 1))
-  printf '%s\n' "$count" > "$counter_file"
-  printf '{"tag_name":"%s"}\n' "${FAKE_LATEST_ORCHESTRION_TAG:-v1.8.0}"
-  exit 0
+done
+PATH="$kept"
+
+if [ "${1:-}" = "--go-shim" ]; then
+  shift
+  if [ "${FAKE_GO_SHIM_FAILS:-0}" = "1" ]; then
+    echo "TestOptimization.build WARN: cannot set up the go shim - running $1 without Test Optimization" >&2
+  else
+    mkdir -p "$FAKE_GO_SHIM_DIR"
+    printf '#!/bin/sh\necho "fake go shim $*"\n' > "$FAKE_GO_SHIM_DIR/go"
+    chmod +x "$FAKE_GO_SHIM_DIR/go"
+    PATH="$FAKE_GO_SHIM_DIR:$PATH"
+  fi
+fi
+export PATH
+exec "$@"
+DDTEST
+  sha256_of "$CURRENT_CASE_DIR/release/ddtest-linux-amd64" > "$CURRENT_CASE_DIR/release/ddtest.sha256"
+  cp "$CURRENT_CASE_DIR/release/ddtest-linux-amd64" "$CURRENT_CASE_DIR/release/ddtest-windows-amd64.exe"
+
+  cat > "$CURRENT_CASE_DIR/bin/curl" <<'EOF_CURL'
+#!/bin/bash
+set -euo pipefail
+
+# download_file runs curl -fLo <file> <url>.
+url="${@: -1}"
+output="${@: -2:1}"
+printf '%s\n' "$url" >> "$FAKE_LOG_DIR/curl.log"
+
+if [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ]; then
+  exit 22
 fi
 
-if [[ "$url" == *"raw.githubusercontent.com/DataDog/orchestrion/"*"/go.mod" ]]; then
-  cat <<MOD
-module github.com/DataDog/orchestrion
-
-go ${FAKE_ORCHESTRION_GO_VERSION:-1.24.0}
-
-require (
-	github.com/DataDog/dd-trace-go/v2 ${FAKE_ORCHESTRION_DD_TRACE_VERSION:-v2.6.0}
-)
-MOD
-  exit 0
-fi
-
-if [[ "$url" == *"raw.githubusercontent.com/DataDog/dd-trace-go/"*"/orchestrion/all/go.mod" ]]; then
-  version="$(echo "$url" | sed -n 's#.*DataDog/dd-trace-go/\(v[0-9][^/]*\)/orchestrion/all/go.mod#\1#p')"
-  case "$version" in
-    v2.6.0) go_version="1.24.0" ;;
-    v2.7.0) go_version="1.25.0" ;;
-    v2.8.0) go_version="1.26.0" ;;
-    *) go_version="${FAKE_DEFAULT_DD_TRACE_GO_VERSION:-1.24.0}" ;;
-  esac
-  cat <<MOD
-module github.com/DataDog/dd-trace-go/orchestrion/all/v2
-
-go $go_version
-MOD
-  exit 0
-fi
-
-echo "Unsupported fake curl request: $url" >&2
-exit 1
-EOF
+case "$url" in
+  https://github.com/DataDog/ddtest/releases/*/SHA256SUMS)
+    checksum="$(cat "$FAKE_RELEASE_DIR/ddtest.sha256")"
+    if [ "${FAKE_BAD_CHECKSUM:-0}" = "1" ]; then
+      checksum="0000000000000000000000000000000000000000000000000000000000000000"
+    fi
+    {
+      printf '%s  ddtest-darwin-arm64\n' "$checksum"
+      if [ "${FAKE_SUMS_WITHOUT_ASSET:-0}" != "1" ]; then
+        printf '%s  ddtest-linux-amd64\n' "$checksum"
+        printf '%s *ddtest-windows-amd64.exe\n' "$checksum"
+      fi
+    } > "$output"
+    ;;
+  https://github.com/DataDog/ddtest/releases/*/ddtest-linux-amd64 | https://github.com/DataDog/ddtest/releases/*/ddtest-windows-amd64.exe)
+    if [ "${FAKE_FAIL_ASSET_DOWNLOAD:-0}" = "1" ]; then
+      # curl keeps what arrived before a transfer error.
+      printf 'partial' > "$output"
+      exit 18
+    fi
+    cp "$FAKE_RELEASE_DIR/${url##*/}" "$output"
+    ;;
+  *)
+    echo "Unsupported fake curl request: $url" >&2
+    exit 1
+    ;;
+esac
+EOF_CURL
   chmod +x "$CURRENT_CASE_DIR/bin/curl"
 
-  cat > "$CURRENT_CASE_DIR/bin/go" <<'EOF'
+  cat > "$CURRENT_CASE_DIR/bin/go" <<'EOF_GO'
 #!/bin/bash
 set -euo pipefail
 
-append_or_replace_requirement() {
-  local go_mod_path="$1"
-  local module_path="$2"
-  local module_version="$3"
-  local temp_path="${go_mod_path}.tmp"
-
-  awk -v module_path="$module_path" '
-    ($1 == module_path) || ($1 == "require" && $2 == module_path) { next }
-    { print }
-  ' "$go_mod_path" > "$temp_path"
-  mv "$temp_path" "$go_mod_path"
-  printf 'require %s %s\n' "$module_path" "$module_version" >> "$go_mod_path"
-}
-
-log_file="$FAKE_LOG_DIR/go.log"
-command_name="${1:-}"
-if [ $# -gt 0 ]; then
-  shift
+if [ "${1:-}" = "version" ]; then
+  if [ "${FAKE_GO_VERSION_FAILS:-0}" = "1" ]; then
+    echo "go: download go1.26.0: connection refused" >&2
+    exit 1
+  fi
+  printf '%s\n' "${FAKE_GO_VERSION_LINE:-go version go${FAKE_GO_VERSION:-1.26.1} linux/amd64}"
+  exit 0
 fi
-
-case "$command_name" in
-  version)
-    printf 'go version go%s darwin/arm64\n' "${FAKE_GO_VERSION:-1.26.1}"
-    ;;
-  list)
-    if [ "${1:-}" = "-m" ] && [ "${2:-}" = "-versions" ] && [ "${3:-}" = "github.com/DataDog/dd-trace-go/v2" ]; then
-      if [ "${FAKE_FAIL_STABLE_LIST:-0}" = "1" ]; then
-        exit 1
-      fi
-      printf 'github.com/DataDog/dd-trace-go/v2 %s\n' "${FAKE_DD_TRACE_GO_VERSIONS:-v2.6.0 v2.7.0 v2.8.0}"
-    else
-      echo "Unsupported fake go list invocation: go list $*" >&2
-      exit 98
-    fi
-    ;;
-  install)
-    printf 'install %s\n' "$*" >> "$log_file"
-    if [ "${FAKE_FAIL_GO_INSTALL:-0}" = "1" ]; then
-      exit 1
-    fi
-    ;;
-  mod)
-    if [ "${1:-}" = "edit" ]; then
-      printf 'mod %s\n' "$*" >> "$log_file"
-      requirement=""
-      for argument in "$@"; do
-        case "$argument" in
-          -require=*)
-            requirement="${argument#-require=}"
-            ;;
-        esac
-      done
-      if [ -z "$requirement" ]; then
-        echo "Unsupported fake go mod edit invocation: go mod $*" >&2
-        exit 97
-      fi
-      append_or_replace_requirement "$(pwd)/go.mod" "${requirement%@*}" "${requirement##*@}"
-    else
-      echo "Unsupported fake go mod invocation: go mod $*" >&2
-      exit 96
-    fi
-    ;;
-  get)
-    printf 'get %s\n' "$*" >> "$log_file"
-    append_or_replace_requirement "$(pwd)/go.mod" "${1%@*}" "${1##*@}"
-    ;;
-  *)
-    echo "Unsupported fake go command: go $command_name $*" >&2
-    exit 95
-    ;;
-esac
-EOF
+printf '%s\n' "$*" >> "$FAKE_LOG_DIR/go.log"
+echo "Unsupported fake go command: go $*" >&2
+exit 95
+EOF_GO
   chmod +x "$CURRENT_CASE_DIR/bin/go"
 
-  cat > "$CURRENT_CASE_DIR/bin/orchestrion" <<'EOF'
+  cat > "$CURRENT_CASE_DIR/bin/uname" <<'EOF_UNAME'
 #!/bin/bash
-set -euo pipefail
-
-append_or_replace_requirement() {
-  local go_mod_path="$1"
-  local module_path="$2"
-  local module_version="$3"
-  local temp_path="${go_mod_path}.tmp"
-
-  awk -v module_path="$module_path" '
-    ($1 == module_path) || ($1 == "require" && $2 == module_path) { next }
-    { print }
-  ' "$go_mod_path" > "$temp_path"
-  mv "$temp_path" "$go_mod_path"
-  printf 'require %s %s\n' "$module_path" "$module_version" >> "$go_mod_path"
-}
-
-command_name="${1:-}"
-case "$command_name" in
-  pin)
-    if [ "${FAKE_FAIL_PIN:-0}" = "1" ]; then
-      exit 1
-    fi
-    tracer_version="$(awk '
-      ($1 == "github.com/DataDog/dd-trace-go/v2") { version = $2 }
-      ($1 == "require" && $2 == "github.com/DataDog/dd-trace-go/v2") { version = $3 }
-      END { print version }
-    ' go.mod)"
-    if [ -z "$tracer_version" ]; then
-      tracer_version="${FAKE_ORCHESTRION_DD_TRACE_VERSION:-v2.6.0}"
-    fi
-    append_or_replace_requirement "$(pwd)/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2" "$tracer_version"
-    cat > orchestrion.tool.go <<TOOL
-// Fake orchestrion output for tests.
-package tools
-TOOL
-    ;;
-  version)
-    printf 'orchestrion %s\n' "${FAKE_ORCHESTRION_VERSION:-v1.8.0}"
-    ;;
-  *)
-    echo "Unsupported fake orchestrion command: orchestrion $*" >&2
-    exit 94
-    ;;
+case "${1:-}" in
+  -s) echo "${FAKE_UNAME_S:-Linux}" ;;
+  -m) echo "${FAKE_UNAME_M:-x86_64}" ;;
+  *) echo "Unsupported fake uname invocation: uname $*" >&2; exit 1 ;;
 esac
-EOF
-  chmod +x "$CURRENT_CASE_DIR/bin/orchestrion"
+EOF_UNAME
+  chmod +x "$CURRENT_CASE_DIR/bin/uname"
+
+  # Git Bash's cygpath -w turns a POSIX path into a Windows one.
+  cat > "$CURRENT_CASE_DIR/bin/cygpath" <<'EOF_CYGPATH'
+#!/bin/bash
+if [ "${1:-}" != "-w" ] || [ $# -ne 2 ]; then
+  echo "Unsupported fake cygpath invocation: cygpath $*" >&2
+  exit 1
+fi
+printf 'C:%s\n' "$(printf '%s' "$2" | tr '/' '\\')"
+EOF_CYGPATH
+  chmod +x "$CURRENT_CASE_DIR/bin/cygpath"
 }
 
 # Create a clean per-scenario workspace and fake toolchain.
@@ -303,9 +254,12 @@ prepare_case() {
   CURRENT_WORKSPACE="$CURRENT_CASE_DIR/workspace"
   mkdir -p "$CURRENT_WORKSPACE"
   create_fake_toolchain
+  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.22"
+  cp "$CURRENT_WORKSPACE/go.mod" "$CURRENT_CASE_DIR/initial.go.mod"
 }
 
-# Run the install script inside the current scenario workspace.
+# Run the install script inside the current scenario workspace, outside GitHub
+# Actions unless a scenario sets GITHUB_PATH: the harness itself can run there.
 run_install_script() {
   LAST_STDOUT="$CURRENT_CASE_DIR/stdout.txt"
   LAST_STDERR="$CURRENT_CASE_DIR/stderr.txt"
@@ -313,14 +267,34 @@ run_install_script() {
   set +e
   (
     cd "$CURRENT_WORKSPACE" &&
-    env \
+    env -u GITHUB_PATH -u GITHUB_ACTION \
       PATH="$CURRENT_CASE_DIR/bin:$PATH" \
       FAKE_LOG_DIR="$CURRENT_CASE_DIR/logs" \
+      FAKE_RELEASE_DIR="$CURRENT_CASE_DIR/release" \
+      FAKE_GO_SHIM_DIR="$CURRENT_CASE_DIR/go-shim" \
+      DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
       "$@" \
       bash "$SCRIPT_UNDER_TEST" > "$LAST_STDOUT" 2> "$LAST_STDERR"
   )
   LAST_EXIT_CODE=$?
   set -e
+}
+
+# Assert that every line on stdout is a variable assignment, the script's
+# contract with its consumers.
+assert_stdout_is_assignments() {
+  if grep -v -E '^[A-Za-z_][A-Za-z0-9_]*=' "$LAST_STDOUT" >&2; then
+    fail "stdout has lines that are not variable assignments"
+  fi
+}
+
+# Assert that the script printed nothing for Go and left the project as it was.
+assert_go_not_instrumented() {
+  assert_stdout_is_assignments
+  assert_file_not_contains "$LAST_STDOUT" "PATH="
+  assert_file_not_contains "$LAST_STDOUT" "DD_TRACER_VERSION_GO="
+  assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
+  assert_files_equal "$CURRENT_CASE_DIR/initial.go.mod" "$CURRENT_WORKSPACE/go.mod"
 }
 
 # Execute one scenario in isolation and keep the matrix running on failures.
@@ -337,306 +311,330 @@ run_case() {
   fi
 }
 
-# Validate the root-module happy path for a Go 1.24 project.
-scenario_root_module_go_124() {
-  prepare_case "root_module_go_124"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.24"
+# Validate the default path: the latest ddtest release is installed and its go
+# shim comes first on the printed PATH, without touching the project.
+scenario_latest_release() {
+  prepare_case "latest_release"
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
+  run_install_script
 
   assert_exit_code 0
-  assert_file_contains "$LAST_STDOUT" "GOFLAGS="
-  assert_file_contains "$LAST_STDOUT" "DD_TRACER_VERSION_GO=v1.8.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.6.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/v2 v2.6.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/orchestrion v1.8.0"
-  assert_file_exists "$CURRENT_WORKSPACE/orchestrion.tool.go"
-}
-
-# Validate the root-module upgrade path for a Go 1.25 project.
-scenario_root_module_go_125() {
-  prepare_case "root_module_go_125"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.25"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
-
-  assert_exit_code 0
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.7.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/v2 v2.7.0"
-  assert_file_exists "$CURRENT_WORKSPACE/orchestrion.tool.go"
-}
-
-# Validate that too-old projects are skipped without mutating go.mod.
-scenario_root_module_go_122_skips() {
-  prepare_case "root_module_go_122_skips"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.22"
-  cp "$CURRENT_WORKSPACE/go.mod" "$CURRENT_CASE_DIR/initial.go.mod"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
-
-  assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "Skipping orchestrion installation."
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/SHA256SUMS"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+  assert_file_contains "$LAST_STDOUT" "DD_TRACER_VERSION_GO=v1.16.0"
   assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
+  assert_files_equal "$CURRENT_CASE_DIR/release/ddtest-linux-amd64" "$CURRENT_WORKSPACE/.datadog/ddtest"
+  if [ ! -x "$CURRENT_WORKSPACE/.datadog/ddtest" ]; then
+    fail "ddtest is not executable"
+  fi
+  assert_file_missing "$CURRENT_WORKSPACE/.datadog/ddtest.SHA256SUMS"
   assert_files_equal "$CURRENT_CASE_DIR/initial.go.mod" "$CURRENT_WORKSPACE/go.mod"
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
+  assert_file_missing "$CURRENT_CASE_DIR/logs/go.log"
+
+  # A job that exports the printed PATH runs the go shim as go.
+  local printed_path
+  printed_path="$(sed -n 's/^PATH=//p' "$LAST_STDOUT")"
+  if [ "$(PATH="$printed_path" command -v go)" != "$CURRENT_CASE_DIR/go-shim/go" ]; then
+    fail "the printed PATH does not run the go shim as go"
+  fi
 }
 
-# Validate the runner lower-bound check from orchestrion's own go.mod.
-scenario_runner_below_orchestrion_minimum() {
-  prepare_case "runner_below_orchestrion_minimum"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.24"
-  cp "$CURRENT_WORKSPACE/go.mod" "$CURRENT_CASE_DIR/initial.go.mod"
+# Validate that a pinned release is downloaded from its own release page, also
+# without the v prefix, into DD_TRACER_FOLDER.
+scenario_pinned_release() {
+  prepare_case "pinned_release"
 
   run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1 \
-    FAKE_ORCHESTRION_GO_VERSION=1.27.0
+    DD_SET_TRACER_VERSION_GO=1.14.0 \
+    DD_TRACER_FOLDER="$CURRENT_CASE_DIR/tracers" \
+    FAKE_DDTEST_VERSION=v1.14.0
 
   assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "does not meet the required version"
-  assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
-  assert_files_equal "$CURRENT_CASE_DIR/initial.go.mod" "$CURRENT_WORKSPACE/go.mod"
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/download/v1.14.0/SHA256SUMS"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/download/v1.14.0/ddtest-linux-amd64"
+  assert_file_exists "$CURRENT_CASE_DIR/tracers/ddtest"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+  assert_file_contains "$LAST_STDOUT" "DD_TRACER_VERSION_GO=v1.14.0"
 }
 
-# Validate the runner lower-bound check for the shipped tracer bundle.
-scenario_runner_below_shipped_tracer_minimum() {
-  prepare_case "runner_below_shipped_tracer_minimum"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.25"
-  cp "$CURRENT_WORKSPACE/go.mod" "$CURRENT_CASE_DIR/initial.go.mod"
+# Validate that a release older than ddtest instrument, such as an earlier
+# Orchestrion pin, installs the latest ddtest with a warning.
+scenario_release_before_instrument_installs_latest() {
+  prepare_case "release_before_instrument_installs_latest"
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.24.0 \
-    FAKE_ORCHESTRION_GO_VERSION=1.24.0 \
-    FAKE_ORCHESTRION_DD_TRACE_VERSION=v2.7.0
+  run_install_script DD_SET_TRACER_VERSION_GO=v1.8.0
 
   assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "lower than the minimum Go version required by dd-trace-go v2.7.0"
-  assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
-  assert_files_equal "$CURRENT_CASE_DIR/initial.go.mod" "$CURRENT_WORKSPACE/go.mod"
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
+  assert_file_contains "$LAST_STDERR" "Warning: DD_SET_TRACER_VERSION_GO=v1.8.0 is not a ddtest release from v1.14.0 on; ddtest replaced Orchestrion for Go. Installing the latest ddtest release."
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64"
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/download/v1.8.0/"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
 }
 
-# Validate nested-module auto-detection for a Go 1.24 project.
-scenario_single_nested_module_go_124() {
-  prepare_case "single_nested_module_go_124"
-  mkdir -p "$CURRENT_WORKSPACE/app"
-  write_go_mod "$CURRENT_WORKSPACE/app/go.mod" "example.com/app" "1.24"
+# Validate that a value that is not a release tag, such as an Orchestrion
+# commit, does the same.
+scenario_commit_version_installs_latest() {
+  prepare_case "commit_version_installs_latest"
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
+  run_install_script DD_SET_TRACER_VERSION_GO=0123abc
 
   assert_exit_code 0
-  assert_file_contains "$CURRENT_WORKSPACE/app/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.6.0"
-  assert_file_contains "$CURRENT_WORKSPACE/app/go.mod" "github.com/DataDog/dd-trace-go/v2 v2.6.0"
-  assert_file_exists "$CURRENT_WORKSPACE/app/orchestrion.tool.go"
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
+  assert_file_contains "$LAST_STDERR" "Warning: DD_SET_TRACER_VERSION_GO=0123abc is not a ddtest release"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
 }
 
-# Validate nested-module auto-detection for a Go 1.25 project.
-scenario_single_nested_module_go_125() {
-  prepare_case "single_nested_module_go_125"
-  mkdir -p "$CURRENT_WORKSPACE/app"
-  write_go_mod "$CURRENT_WORKSPACE/app/go.mod" "example.com/app" "1.25"
+# Validate that a runner whose Go toolchain is older than ddtest needs is skipped.
+scenario_runner_go_below_minimum() {
+  prepare_case "runner_go_below_minimum"
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
+  run_install_script FAKE_GO_VERSION=1.24.5
 
   assert_exit_code 0
-  assert_file_contains "$CURRENT_WORKSPACE/app/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.7.0"
-  assert_file_contains "$CURRENT_WORKSPACE/app/go.mod" "github.com/DataDog/dd-trace-go/v2 v2.7.0"
-  assert_file_exists "$CURRENT_WORKSPACE/app/orchestrion.tool.go"
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
+  assert_file_contains "$LAST_STDERR" "Warning: The installed Go version (1.24.5) is lower than the Go 1.25.0 that ddtest instrument needs."
+  assert_file_contains "$LAST_STDERR" "Skipping Go instrumentation."
+  assert_file_missing "$CURRENT_CASE_DIR/logs/curl.log"
+  assert_go_not_instrumented
 }
 
-# Validate the clean skip path for multiple nested modules without an override.
-scenario_multiple_modules_without_override() {
-  prepare_case "multiple_modules_without_override"
-  mkdir -p "$CURRENT_WORKSPACE/api" "$CURRENT_WORKSPACE/worker"
-  write_go_mod "$CURRENT_WORKSPACE/api/go.mod" "example.com/api" "1.24"
-  write_go_mod "$CURRENT_WORKSPACE/worker/go.mod" "example.com/worker" "1.24"
+# Validate that a host without a ddtest release executable is skipped.
+scenario_unsupported_platform() {
+  prepare_case "unsupported_platform"
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
+  run_install_script FAKE_UNAME_S=FreeBSD
 
   assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "Set DD_CIVISIBILITY_GO_MODULE_DIR"
-  assert_file_missing "$CURRENT_WORKSPACE/api/orchestrion.tool.go"
-  assert_file_missing "$CURRENT_WORKSPACE/worker/orchestrion.tool.go"
+  assert_file_contains "$LAST_STDERR" "Warning: ddtest has no release executable for FreeBSD x86_64."
+  assert_file_contains "$LAST_STDERR" "Skipping Go instrumentation."
+  assert_file_missing "$CURRENT_CASE_DIR/logs/curl.log"
+  assert_go_not_instrumented
 }
 
-# Validate explicit module selection in a multi-module repository.
-scenario_multiple_modules_with_override() {
-  prepare_case "multiple_modules_with_override"
-  mkdir -p "$CURRENT_WORKSPACE/api" "$CURRENT_WORKSPACE/worker"
-  write_go_mod "$CURRENT_WORKSPACE/api/go.mod" "example.com/api" "1.24"
-  write_go_mod "$CURRENT_WORKSPACE/worker/go.mod" "example.com/worker" "1.25"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    DD_CIVISIBILITY_GO_MODULE_DIR=worker \
-    FAKE_GO_VERSION=1.26.1
-
-  assert_exit_code 0
-  assert_file_missing "$CURRENT_WORKSPACE/api/orchestrion.tool.go"
-  assert_file_exists "$CURRENT_WORKSPACE/worker/orchestrion.tool.go"
-  assert_file_contains "$CURRENT_WORKSPACE/worker/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.7.0"
-  assert_file_not_contains "$CURRENT_WORKSPACE/api/go.mod" "github.com/DataDog/orchestrion"
+# Put an earlier installation's ddtest in the workspace's .datadog folder.
+install_previous_ddtest() {
+  mkdir -p "$CURRENT_WORKSPACE/.datadog"
+  printf 'previous ddtest\n' > "$CURRENT_WORKSPACE/.datadog/ddtest"
+  cp "$CURRENT_WORKSPACE/.datadog/ddtest" "$CURRENT_CASE_DIR/previous-ddtest"
 }
 
-# Validate the explicit missing-directory failure path.
-scenario_override_missing_directory() {
-  prepare_case "override_missing_directory"
+# Assert that the earlier installation's ddtest, which its go shims link to,
+# is still there, and that no download is left beside it.
+assert_previous_ddtest_kept() {
+  assert_files_equal "$CURRENT_CASE_DIR/previous-ddtest" "$CURRENT_WORKSPACE/.datadog/ddtest"
+  local leftover
+  for leftover in "$CURRENT_WORKSPACE"/.datadog/*; do
+    if [ "$leftover" != "$CURRENT_WORKSPACE/.datadog/ddtest" ]; then
+      fail "left behind: $leftover"
+    fi
+  done
+}
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    DD_CIVISIBILITY_GO_MODULE_DIR=missing \
-    FAKE_GO_VERSION=1.26.1
+# Validate that an executable that does not match SHA256SUMS does not replace
+# the installed one.
+scenario_checksum_mismatch() {
+  prepare_case "checksum_mismatch"
+  install_previous_ddtest
+
+  run_install_script FAKE_BAD_CHECKSUM=1
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "DD_CIVISIBILITY_GO_MODULE_DIR points to a directory that does not exist"
-  assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
+  assert_file_contains "$LAST_STDERR" "ddtest-linux-amd64 does not match the checksum in the ddtest release."
+  assert_previous_ddtest_kept
+  assert_go_not_instrumented
 }
 
-# Validate the explicit "directory exists but has no go.mod" failure path.
-scenario_override_without_go_mod() {
-  prepare_case "override_without_go_mod"
-  mkdir -p "$CURRENT_WORKSPACE/empty"
+# Validate that an interrupted download does not replace the installed ddtest.
+scenario_interrupted_download() {
+  prepare_case "interrupted_download"
+  install_previous_ddtest
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    DD_CIVISIBILITY_GO_MODULE_DIR=empty \
-    FAKE_GO_VERSION=1.26.1
+  run_install_script FAKE_FAIL_ASSET_DOWNLOAD=1
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "DD_CIVISIBILITY_GO_MODULE_DIR does not contain a go.mod file"
-  assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64."
+  assert_previous_ddtest_kept
+  assert_go_not_instrumented
 }
 
-# Validate the clean skip path when no Go module exists anywhere.
-scenario_no_go_mod_anywhere() {
-  prepare_case "no_go_mod_anywhere"
+# Validate that a go that cannot report its version fails the installation
+# instead of being skipped as too old.
+scenario_go_version_fails() {
+  prepare_case "go_version_fails"
 
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
-
-  assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "Could not find a go.mod file"
-  assert_file_not_contains "$LAST_STDOUT" "GOFLAGS="
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
-}
-
-# Validate the fallback path for projects without a go directive.
-scenario_missing_go_directive_falls_back() {
-  prepare_case "missing_go_directive_falls_back"
-  write_go_mod_without_go_directive "$CURRENT_WORKSPACE/go.mod" "example.com/root"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1
-
-  assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "Could not read the project Go version"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.6.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/v2 v2.6.0"
-  assert_file_exists "$CURRENT_WORKSPACE/orchestrion.tool.go"
-}
-
-# Validate the fallback path when the stable tracer list cannot be retrieved.
-scenario_missing_stable_tracer_list_falls_back() {
-  prepare_case "missing_stable_tracer_list_falls_back"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.25"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1 \
-    FAKE_FAIL_STABLE_LIST=1
-
-  assert_exit_code 0
-  assert_file_contains "$LAST_STDERR" "Could not retrieve the list of stable dd-trace-go versions."
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/orchestrion/all/v2 v2.6.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/dd-trace-go/v2 v2.6.0"
-}
-
-# Validate that "latest" is resolved once and reused consistently.
-scenario_latest_resolved_once() {
-  prepare_case "latest_resolved_once"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.24"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=latest \
-    FAKE_GO_VERSION=1.26.1 \
-    FAKE_LATEST_ORCHESTRION_TAG=v1.8.0
-
-  assert_exit_code 0
-  assert_file_contains "$CURRENT_CASE_DIR/logs/latest_requests.count" "1"
-  assert_file_contains "$CURRENT_CASE_DIR/logs/go.log" "install github.com/DataDog/orchestrion@v1.8.0"
-  assert_file_contains "$CURRENT_CASE_DIR/logs/go.log" "get github.com/DataDog/orchestrion@v1.8.0"
-  assert_file_contains "$CURRENT_WORKSPACE/go.mod" "github.com/DataDog/orchestrion v1.8.0"
-}
-
-# Validate that a failed orchestrion install does not dirty go.mod.
-scenario_failed_go_install_keeps_go_mod_clean() {
-  prepare_case "failed_go_install_keeps_go_mod_clean"
-  write_go_mod "$CURRENT_WORKSPACE/go.mod" "example.com/root" "1.24"
-  cp "$CURRENT_WORKSPACE/go.mod" "$CURRENT_CASE_DIR/initial.go.mod"
-
-  run_install_script \
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
-    DD_SET_TRACER_VERSION_GO=v1.8.0 \
-    FAKE_GO_VERSION=1.26.1 \
-    FAKE_FAIL_GO_INSTALL=1
+  run_install_script FAKE_GO_VERSION_FAILS=1
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "Error: Could not install orchestrion for Go."
-  assert_files_equal "$CURRENT_CASE_DIR/initial.go.mod" "$CURRENT_WORKSPACE/go.mod"
-  assert_file_not_contains "$CURRENT_CASE_DIR/logs/go.log" "mod edit"
-  assert_file_missing "$CURRENT_WORKSPACE/orchestrion.tool.go"
+  assert_file_contains "$LAST_STDERR" "Error: go version failed."
+  assert_file_not_contains "$LAST_STDERR" "Skipping Go instrumentation."
+  assert_go_not_instrumented
+}
+
+# Validate that a development build of the minimum Go comes before it.
+scenario_runner_go_minimum_development_build() {
+  prepare_case "runner_go_minimum_development_build"
+
+  run_install_script FAKE_GO_VERSION_LINE="go version devel go1.25-0123abc Tue Nov 4 10:00:00 2025 +0000 linux/amd64"
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDERR" "Warning: The installed Go version (1.25) is lower than the Go 1.25.0 that ddtest instrument needs."
+  assert_go_not_instrumented
+}
+
+# Validate that a development build of a later Go than the minimum is enough.
+scenario_runner_go_later_development_build() {
+  prepare_case "runner_go_later_development_build"
+
+  run_install_script FAKE_GO_VERSION_LINE="go version devel go1.26-0123abc Tue Nov 4 10:00:00 2025 +0000 linux/amd64"
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that a release without an executable for the host fails.
+scenario_release_without_asset() {
+  prepare_case "release_without_asset"
+
+  run_install_script FAKE_SUMS_WITHOUT_ASSET=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "has no ddtest-linux-amd64"
+  assert_file_missing "$CURRENT_WORKSPACE/.datadog/ddtest"
+  assert_go_not_instrumented
+}
+
+# Validate that a failed download fails the installation.
+scenario_download_failure() {
+  prepare_case "download_failure"
+
+  run_install_script FAKE_FAIL_DOWNLOADS=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/latest/download/SHA256SUMS."
+  assert_go_not_instrumented
+}
+
+# Validate that ddtest running the command without its go shim fails the
+# installation instead of printing a PATH that does not instrument go test.
+scenario_go_shim_unavailable() {
+  prepare_case "go_shim_unavailable"
+
+  run_install_script FAKE_GO_SHIM_FAILS=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: ddtest could not set up its go command for Go instrumentation."
+  assert_go_not_instrumented
+}
+
+# Validate that in GitHub Actions on Linux and macOS the go shim comes on the
+# printed PATH, which a step that exports the output can use at once, and goes
+# to GITHUB_PATH, which the next steps get before setup-go's directories.
+scenario_github_actions() {
+  prepare_case "github_actions"
+  printf '/opt/hostedtoolcache/go/bin\n' > "$CURRENT_CASE_DIR/github_path"
+
+  run_install_script GITHUB_PATH="$CURRENT_CASE_DIR/github_path"
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+  assert_files_equal <(printf '/opt/hostedtoolcache/go/bin\n%s\n' "$CURRENT_CASE_DIR/go-shim") "$CURRENT_CASE_DIR/github_path"
+}
+
+# Validate that a DD_TRACER_FOLDER with spaces, not created yet, holds ddtest.
+scenario_tracer_folder_with_spaces() {
+  prepare_case "tracer_folder_with_spaces"
+
+  run_install_script DD_TRACER_FOLDER="$CURRENT_CASE_DIR/tracer folder/datadog"
+
+  assert_exit_code 0
+  assert_file_exists "$CURRENT_CASE_DIR/tracer folder/datadog/ddtest"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that a release candidate of an older Go counts as that older Go.
+scenario_runner_go_release_candidate_below_minimum() {
+  prepare_case "runner_go_release_candidate_below_minimum"
+
+  run_install_script FAKE_GO_VERSION=1.24rc1
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDERR" "Warning: The installed Go version (1.24rc1) is lower than the Go 1.25.0 that ddtest instrument needs."
+  assert_file_missing "$CURRENT_CASE_DIR/logs/curl.log"
+  assert_go_not_instrumented
+}
+
+# Validate that a release candidate of the minimum Go comes before it.
+scenario_runner_go_minimum_release_candidate() {
+  prepare_case "runner_go_minimum_release_candidate"
+
+  run_install_script FAKE_GO_VERSION=1.25rc1
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDERR" "Warning: The installed Go version (1.25rc1) is lower than the Go 1.25.0 that ddtest instrument needs."
+  assert_go_not_instrumented
+}
+
+# Validate that a release candidate of a later Go than the minimum is enough.
+scenario_runner_go_later_release_candidate() {
+  prepare_case "runner_go_later_release_candidate"
+
+  run_install_script FAKE_GO_VERSION=1.26rc1
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that Git Bash on Windows installs ddtest.exe and, outside GitHub
+# Actions, prints the go shim on a PATH in the shell's own POSIX form.
+scenario_windows_shell() {
+  prepare_case "windows_shell"
+
+  run_install_script FAKE_UNAME_S=MINGW64_NT-10.0-20348
+
+  assert_exit_code 0
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/ddtest-windows-amd64.exe"
+  assert_file_exists "$CURRENT_WORKSPACE/.datadog/ddtest.exe"
+  assert_file_missing "$CURRENT_WORKSPACE/.datadog/ddtest"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that in GitHub Actions on Windows the go shim goes to GITHUB_PATH as
+# a Windows path, which the runner's later steps, in any shell, can read.
+scenario_windows_github_actions() {
+  prepare_case "windows_github_actions"
+  touch "$CURRENT_CASE_DIR/github_path"
+
+  run_install_script \
+    FAKE_UNAME_S=MINGW64_NT-10.0-20348 \
+    GITHUB_PATH="$CURRENT_CASE_DIR/github_path"
+
+  assert_exit_code 0
+  assert_files_equal <(printf 'C:%s\n' "$(printf '%s' "$CURRENT_CASE_DIR/go-shim" | tr '/' '\\')") "$CURRENT_CASE_DIR/github_path"
+  assert_file_not_contains "$LAST_STDOUT" "PATH="
 }
 
 main() {
-  run_case "root_module_go_124" scenario_root_module_go_124
-  run_case "root_module_go_125" scenario_root_module_go_125
-  run_case "root_module_go_122_skips" scenario_root_module_go_122_skips
-  run_case "runner_below_orchestrion_minimum" scenario_runner_below_orchestrion_minimum
-  run_case "runner_below_shipped_tracer_minimum" scenario_runner_below_shipped_tracer_minimum
-  run_case "single_nested_module_go_124" scenario_single_nested_module_go_124
-  run_case "single_nested_module_go_125" scenario_single_nested_module_go_125
-  run_case "multiple_modules_without_override" scenario_multiple_modules_without_override
-  run_case "multiple_modules_with_override" scenario_multiple_modules_with_override
-  run_case "override_missing_directory" scenario_override_missing_directory
-  run_case "override_without_go_mod" scenario_override_without_go_mod
-  run_case "no_go_mod_anywhere" scenario_no_go_mod_anywhere
-  run_case "missing_go_directive_falls_back" scenario_missing_go_directive_falls_back
-  run_case "missing_stable_tracer_list_falls_back" scenario_missing_stable_tracer_list_falls_back
-  run_case "latest_resolved_once" scenario_latest_resolved_once
-  run_case "failed_go_install_keeps_go_mod_clean" scenario_failed_go_install_keeps_go_mod_clean
+  run_case "latest_release" scenario_latest_release
+  run_case "pinned_release" scenario_pinned_release
+  run_case "release_before_instrument_installs_latest" scenario_release_before_instrument_installs_latest
+  run_case "commit_version_installs_latest" scenario_commit_version_installs_latest
+  run_case "runner_go_below_minimum" scenario_runner_go_below_minimum
+  run_case "unsupported_platform" scenario_unsupported_platform
+  run_case "checksum_mismatch" scenario_checksum_mismatch
+  run_case "interrupted_download" scenario_interrupted_download
+  run_case "go_version_fails" scenario_go_version_fails
+  run_case "runner_go_minimum_development_build" scenario_runner_go_minimum_development_build
+  run_case "runner_go_later_development_build" scenario_runner_go_later_development_build
+  run_case "release_without_asset" scenario_release_without_asset
+  run_case "download_failure" scenario_download_failure
+  run_case "go_shim_unavailable" scenario_go_shim_unavailable
+  run_case "github_actions" scenario_github_actions
+  run_case "tracer_folder_with_spaces" scenario_tracer_folder_with_spaces
+  run_case "runner_go_release_candidate_below_minimum" scenario_runner_go_release_candidate_below_minimum
+  run_case "runner_go_minimum_release_candidate" scenario_runner_go_minimum_release_candidate
+  run_case "runner_go_later_release_candidate" scenario_runner_go_later_release_candidate
+  run_case "windows_shell" scenario_windows_shell
+  run_case "windows_github_actions" scenario_windows_github_actions
 
   printf '\nGo matrix: %s passed, %s failed\n' "$PASS_COUNT" "$FAIL_COUNT"
   if [ "$FAIL_COUNT" -ne 0 ]; then

@@ -11,12 +11,18 @@
 set -e
 
 ARTIFACTS_FOLDER="${DD_TRACER_FOLDER:-$(pwd)/.datadog}"
-if ! mkdir -p $ARTIFACTS_FOLDER; then
+if ! mkdir -p "$ARTIFACTS_FOLDER"; then
   >&2 echo "Error: Cannot create folder: $ARTIFACTS_FOLDER"
   return 1
 fi
 
 DEFAULT_JAVA_TRACER_REPOSITORY_URL="https://repo1.maven.org/maven2/com/datadoghq/dd-java-agent"
+
+# Go tests report through ddtest instrument, which ddtest has carried since
+# v1.14.0 and which needs a Go 1.25 or newer toolchain.
+DDTEST_RELEASES_URL="https://github.com/DataDog/ddtest/releases"
+DDTEST_MINIMUM_VERSION="v1.14.0"
+DDTEST_MINIMUM_GO_VERSION="1.25.0"
 
 extract_major_version() {
   echo "$1" | cut -d '.' -f 1
@@ -450,237 +456,25 @@ install_ruby_tracer() {
 }
 
 #
-# Resolve the user-provided orchestrion selector to a single concrete tag so
-# the rest of the installation flow uses one stable orchestrion version.
-resolve_orchestrion_tag() {
-    local input_tag="$1"
-
-    # Reuse explicitly requested tags as-is.
-    if [ "$input_tag" != "latest" ]; then
-        echo "$input_tag"
-        return 0
-    fi
-
-    # Resolve "latest" once through the GitHub releases API so the rest of the
-    # installation flow works with a single concrete orchestrion version.
-    local tag
-    tag=$(curl -sSf -A "github-action" https://api.github.com/repos/datadog/orchestrion/releases/latest \
-          | grep -o '"tag_name": *"[^"]*"' \
-          | head -n 1 \
-          | sed 's/"tag_name": *"\([^"]*\)"/\1/')
-    if [ -z "$tag" ]; then
-        echo "Error: Could not retrieve the latest tag." >&2
-        return 1
-    fi
-
-    echo "$tag"
-}
-
-#
-# Download the requested orchestrion go.mod file from GitHub so later helpers
-# can read the dependency versions that shipped with that release.
-fetch_orchestrion_go_mod() {
-    local tag="$1"
-    local modfile="${2:-go.mod}"
-    local url=""
-
-    # Support both released tags and direct commit SHAs so the script can keep
-    # working with the same kinds of inputs accepted by `go install`.
-    if [[ "$tag" =~ ^[0-9a-f]{7,40}$ ]]; then
-        url="https://raw.githubusercontent.com/DataDog/orchestrion/${tag}/${modfile}"
-    else
-        url="https://raw.githubusercontent.com/DataDog/orchestrion/refs/tags/${tag}/${modfile}"
-    fi
-
-    # Read the upstream go.mod file directly from GitHub so we can reuse the
-    # versions that shipped with the selected orchestrion release.
-    local go_mod
-    go_mod=$(curl -sSf -A "github-action" "$url" || true)
-    if [ -z "$go_mod" ]; then
-        echo "Error: Could not retrieve ${modfile} from ${url}" >&2
-        return 1
-    fi
-
-    echo "$go_mod"
-}
-
-# Function to get the Go version from the go.mod file of a release
-get_orchestrion_go_version() {
-    local input_tag="$1"
-
-    local tag
-    tag=$(resolve_orchestrion_tag "$input_tag") || return 1
-
-    local go_mod
-    go_mod=$(fetch_orchestrion_go_mod "$tag") || return 1
-
-    # Extract the Go version by searching for the line starting with "go "
-    local go_version
-    go_version=$(echo "$go_mod" | grep -m 1 '^go ' | awk '{print $2}')
-    if [ -z "$go_version" ]; then
-        echo "Error: Could not extract the Go version from go.mod" >&2
-        return 1
-    fi
-
-    echo "$go_version"
-}
-
-get_orchestrion_module_version() {
-    local input_tag="$1"
-    local module_path="$2"
-    local modfile="${3:-go.mod}"
-
-    # Resolve the orchestrion tag first so every lookup in this run points to
-    # the same upstream revision.
-    local tag
-    tag=$(resolve_orchestrion_tag "$input_tag") || return 1
-
-    local go_mod
-    go_mod=$(fetch_orchestrion_go_mod "$tag" "$modfile") || return 1
-
-    # Extract the version from the relevant require line in the selected go.mod.
-    local module_version
-    module_version=$(echo "$go_mod" | awk -v module_path="$module_path" '$1 == module_path { print $2; exit }')
-    if [ -z "$module_version" ]; then
-        echo "Error: Could not extract ${module_path} version from ${modfile}" >&2
-        return 1
-    fi
-
-    echo "$module_version"
-}
-
-#
-# Read the target project's Go directive from go.mod so tracer selection can
-# stay within the Go version the project already declares.
-get_current_project_go_version() {
-    local go_mod_path="${1:-go.mod}"
-
-    if [ ! -f "$go_mod_path" ]; then
-        echo "Error: Could not find ${go_mod_path} in the current directory." >&2
-        return 1
-    fi
-
-    # Read the Go directive from the target project so later version selection
-    # can stay within the Go level the project already declares.
-    local go_version
-    go_version=$(grep -m 1 '^go ' "$go_mod_path" | awk '{print $2}')
-    if [ -z "$go_version" ]; then
-        echo "Error: Could not extract the Go version from ${go_mod_path}" >&2
-        return 1
-    fi
-
-    echo "$go_version"
-}
-
-resolve_go_module_directory() {
-    local configured_module_dir="${DD_CIVISIBILITY_GO_MODULE_DIR:-}"
-
-    # An explicit override is user intent, so validate it strictly instead of
-    # silently ignoring it.
-    if [ -n "$configured_module_dir" ]; then
-        if [ ! -d "$configured_module_dir" ]; then
-            echo "Error: DD_CIVISIBILITY_GO_MODULE_DIR points to a directory that does not exist: $configured_module_dir" >&2
-            return 1
-        fi
-
-        local absolute_configured_module_dir
-        absolute_configured_module_dir=$(cd "$configured_module_dir" && pwd)
-        if [ ! -f "$absolute_configured_module_dir/go.mod" ]; then
-            echo "Error: DD_CIVISIBILITY_GO_MODULE_DIR does not contain a go.mod file: $absolute_configured_module_dir" >&2
-            return 1
-        fi
-
-        echo "$absolute_configured_module_dir"
-        return 0
-    fi
-
-    # When the script already runs in the module root, keep using the current
-    # directory and avoid extra filesystem scanning.
-    if [ -f "go.mod" ]; then
-        pwd
-        return 0
-    fi
-
-    # For repository roots that do not contain go.mod directly, auto-detect a
-    # single nested module. If there is more than one candidate, do not guess.
-    local -a go_mod_candidates=()
-    # Collect the detected go.mod paths into an array using syntax that works
-    # on the Bash 3.2 shell shipped on macOS GitHub runners.
-    while IFS= read -r go_mod_candidate; do
-        go_mod_candidates+=("$go_mod_candidate")
-    done < <(
-        find . \
-            \( -path '*/.git' -o -path '*/vendor' -o -path '*/node_modules' \) -prune -o \
-            -type f -name go.mod -print \
-            | sort
-    )
-
-    if [ ${#go_mod_candidates[@]} -eq 1 ]; then
-        local detected_module_dir
-        detected_module_dir=$(dirname "${go_mod_candidates[0]}")
-        (cd "$detected_module_dir" && pwd)
-        return 0
-    fi
-
-    if [ ${#go_mod_candidates[@]} -eq 0 ]; then
-        return 2
-    fi
-
-    return 3
-}
-
-#
-# List the published stable dd-trace-go/v2 releases so the installer can pick
-# the newest compatible tracer without considering prerelease tags.
-list_stable_dd_trace_go_versions() {
-    local module_dir="${1:-.}"
-
-    # Query the published v2 module versions and keep only stable x.y.z tags.
-    # This intentionally skips rc/dev builds so the script selects the newest
-    # supported released tracer version instead of a pre-release.
-    (
-        cd "$module_dir" &&
-        go list -m -versions github.com/DataDog/dd-trace-go/v2 2>/dev/null \
-            | awk '{for (i = 2; i <= NF; i++) print $i}' \
-            | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
-    )
-}
-
-fetch_dd_trace_go_orchestrion_all_go_mod() {
-    local version="$1"
-    local url="https://raw.githubusercontent.com/DataDog/dd-trace-go/${version}/orchestrion/all/go.mod"
-
-    # Read the integration module metadata directly from GitHub because
-    # `orchestrion pin` ultimately adds this module to go.mod.
-    local go_mod
-    go_mod=$(curl -sSf -A "github-action" "$url" || true)
-    if [ -z "$go_mod" ]; then
-        echo "Error: Could not retrieve orchestrion/all/go.mod from ${url}" >&2
-        return 1
-    fi
-
-    echo "$go_mod"
-}
-
-#
-# Read the Go directive from dd-trace-go's orchestrion/all module for a given
-# tracer version so we can check whether that tracer is compatible.
-get_dd_trace_go_orchestrion_all_go_version() {
-    local version="$1"
-
-    local go_mod
-    go_mod=$(fetch_dd_trace_go_orchestrion_all_go_mod "$version") || return 1
-
-    # Extract the Go directive that tells us whether this tracer release can be
-    # used without requiring a newer Go version than the project or runner has.
-    local go_version
-    go_version=$(echo "$go_mod" | grep -m 1 '^go ' | awk '{print $2}')
-    if [ -z "$go_version" ]; then
-        echo "Error: Could not extract the Go version from orchestrion/all/go.mod for ${version}" >&2
-        return 1
-    fi
-
-    echo "$go_version"
+# Print the name of ddtest's release executable for this host, or fail when
+# ddtest publishes none for it. On Windows the script runs in Git Bash, MSYS2 or
+# Cygwin.
+ddtest_release_asset() {
+  local os
+  local suffix=""
+  local arch
+  case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    MINGW*|MSYS*|CYGWIN*) os=windows; suffix=".exe" ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  echo "ddtest-$os-$arch$suffix"
 }
 
 # Helper function to compare two semantic version numbers.
@@ -719,101 +513,6 @@ version_ge() {
     return 0
 }
 
-#
-# Return the lower of two semantic versions so tracer selection can use the
-# stricter compatibility ceiling between the project and the runner.
-version_min() {
-    if version_ge "$1" "$2"; then
-        echo "$2"
-    else
-        echo "$1"
-    fi
-}
-
-#
-# Pick the newest stable dd-trace-go release that is not older than the
-# orchestrion-shipped baseline and whose orchestrion/all module still supports
-# the effective Go ceiling for this project and runner.
-select_dd_trace_go_version_for_project() {
-    local minimum_version="$1"
-    local max_supported_go_version="$2"
-    local module_dir="${3:-.}"
-
-    local -a available_versions=()
-    # Collect the published stable tracer versions into an array using syntax
-    # that works on the Bash 3.2 shell shipped on macOS GitHub runners.
-    while IFS= read -r available_version; do
-        available_versions+=("$available_version")
-    done < <(list_stable_dd_trace_go_versions "$module_dir")
-    if [ ${#available_versions[@]} -eq 0 ]; then
-        echo "Error: Could not retrieve the list of stable dd-trace-go versions." >&2
-        return 1
-    fi
-
-    # Selection algorithm:
-    # - Start from the newest stable dd-trace-go release.
-    # - Reject anything older than the orchestrion-shipped baseline.
-    # - For each remaining candidate, read orchestrion/all/go.mod and keep the
-    #   first release whose Go requirement fits within the effective Go ceiling.
-    # The first match is the newest stable tracer that is both safe for the
-    # selected orchestrion release and compatible with this project + runner.
-    # Walk the stable releases from newest to oldest and pick the first one
-    # that satisfies both constraints:
-    # 1. It is not older than the version shipped with the selected orchestrion.
-    # 2. Its orchestrion/all module does not require a newer Go version than
-    #    the project and runner can support together.
-    local candidate_version
-    local candidate_go_version
-    local index
-    for (( index=${#available_versions[@]}-1; index>=0; index-- )); do
-        candidate_version="${available_versions[index]}"
-
-        if ! version_ge "$candidate_version" "$minimum_version"; then
-            continue
-        fi
-
-        candidate_go_version=$(get_dd_trace_go_orchestrion_all_go_version "$candidate_version" 2>/dev/null || true)
-        if [ -z "$candidate_go_version" ]; then
-            continue
-        fi
-
-        if version_ge "$max_supported_go_version" "$candidate_go_version"; then
-            echo "$candidate_version"
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-# Function to check if the installed Go version meets the requirement.
-# It calls get_go_version with a provided parameter (tag name or "latest"),
-# extracts the installed version from `go version`, and compares both.
-# Returns "true" if installed Go version >= required version, "false" otherwise.
-check_go_version_requirement() {
-    local tag_param="$1"
-    local required_version
-
-    # Get the required Go version from the release go.mod file
-    required_version=$(get_orchestrion_go_version "$tag_param")
-    if [ $? -ne 0 ]; then
-        echo "Error retrieving required version" >&2
-        echo "false"  # Consistently output false in case of error
-        return 0     # Optionally return 0 to indicate successful processing of output
-    fi
-
-    # Extract installed Go version.
-    local installed_version
-    installed_version=$(go version | awk '{print $3}' | sed 's/^go//')
-
-    # Use version_ge to compare the installed and required versions
-    if version_ge "$installed_version" "$required_version"; then
-         echo "true"
-    else
-         echo "false"
-    fi
-}
-
 install_go_tracer() {
   # Check if go is installed
   if ! command -v go >/dev/null 2>&1; then
@@ -821,174 +520,140 @@ install_go_tracer() {
     return 1
   fi
 
-  if [ -z "$DD_SET_TRACER_VERSION_GO" ]; then
-      DD_SET_TRACER_VERSION_GO=latest
+  # ddtest instrument builds with the runner's toolchain; the project's go.mod
+  # can still declare an older Go version. A go that cannot report its version,
+  # such as a toolchain that GOTOOLCHAIN fails to download, is an error, not a
+  # Go too old to instrument.
+  local go_version_output
+  if ! go_version_output=$(go version); then
+    >&2 echo "Error: go version failed."
+    return 1
   fi
-
-  # Resolve the input to a concrete orchestrion tag once so "latest" does not
-  # drift between the different network calls below.
-  local resolved_orchestrion_tag
-  resolved_orchestrion_tag=$(resolve_orchestrion_tag "$DD_SET_TRACER_VERSION_GO" || true)
-  if [ $? -ne 0 ] || [ -z "$resolved_orchestrion_tag" ]; then
-      echo "Error: Could not resolve the orchestrion tag for $DD_SET_TRACER_VERSION_GO." >&2
-      return 1
-  fi
-
-  # Try to retrieve the required Go version from orchestrion's go.mod file using the specified tag.
-  local orchestrion_go_version
-  orchestrion_go_version=$(get_orchestrion_go_version "$resolved_orchestrion_tag" || true)
-  if [ $? -ne 0 ] || [ -z "$orchestrion_go_version" ]; then
-      echo "Error: Could not retrieve the required Go version for orchestrion (tag: $resolved_orchestrion_tag)." >&2
-      echo "Skipping orchestrion installation." >&2
-      return 0
-  fi
-
-  # Get the installed Go version (e.g., "1.24.0" from "go version go1.24.0 darwin/arm64")
   local installed_go_version
-  installed_go_version=$(go version | awk '{print $3}' | sed 's/^go//')
-
-  # Compare the installed version with the required version.
-  if ! version_ge "$installed_go_version" "$orchestrion_go_version"; then
-      echo "The installed Go version ($installed_go_version) does not meet the required version ($orchestrion_go_version) for orchestrion (tag: $resolved_orchestrion_tag)." >&2
-      echo "Skipping orchestrion installation." >&2
-      return 0
+  installed_go_version=$(echo "$go_version_output" | grep -o -E 'go[0-9]+(\.[0-9]+)*((rc|beta)[0-9]*)?' | head -n 1 | sed 's/^go//')
+  if [ -z "$installed_go_version" ]; then
+    >&2 echo "Error: Could not read the Go version from: $go_version_output"
+    return 1
+  fi
+  # As Go orders versions, and ddtest with them, a prerelease such as go1.25rc1
+  # and a development build such as "devel go1.25-abc" come before go1.25.0.
+  local installed_go_release="${installed_go_version%%[a-z]*}"
+  if ! version_ge "$installed_go_release" "$DDTEST_MINIMUM_GO_VERSION" ||
+     { version_ge "$DDTEST_MINIMUM_GO_VERSION" "$installed_go_release" && [ "$installed_go_version" != "$DDTEST_MINIMUM_GO_VERSION" ]; }; then
+    >&2 echo "Warning: The installed Go version ($installed_go_version) is lower than the Go $DDTEST_MINIMUM_GO_VERSION that ddtest instrument needs."
+    >&2 echo "Skipping Go instrumentation."
+    return 0
   fi
 
-  # Resolve the Go module directory before touching go.mod. The script first
-  # honors an explicit override, then tries the current directory, then falls
-  # back to single-module auto-detection for repository roots that only contain
-  # a nested Go project.
-  local go_module_dir
-  local module_resolution_status
-  if go_module_dir=$(resolve_go_module_directory); then
-      module_resolution_status=0
+  local asset
+  if ! asset=$(ddtest_release_asset); then
+    >&2 echo "Warning: ddtest has no release executable for $(uname -s) $(uname -m)."
+    >&2 echo "Skipping Go instrumentation."
+    return 0
+  fi
+
+  # DD_SET_TRACER_VERSION_GO selects a ddtest release; it selected an
+  # Orchestrion release, or commit, before ddtest replaced Orchestrion. A value
+  # that names no ddtest release with ddtest instrument, such as an earlier
+  # Orchestrion pin, cannot be honored: the latest ddtest is installed instead,
+  # with a warning, so the job keeps Go instrumented.
+  local ddtest_version="${DD_SET_TRACER_VERSION_GO:-latest}"
+  if [ "$ddtest_version" != "latest" ]; then
+    if [[ "$ddtest_version" =~ ^[0-9] ]]; then
+      ddtest_version="v$ddtest_version"
+    fi
+    if ! [[ "$ddtest_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || ! version_ge "$ddtest_version" "$DDTEST_MINIMUM_VERSION"; then
+      >&2 echo "Warning: DD_SET_TRACER_VERSION_GO=$DD_SET_TRACER_VERSION_GO is not a ddtest release from $DDTEST_MINIMUM_VERSION on; ddtest replaced Orchestrion for Go. Installing the latest ddtest release."
+      ddtest_version="latest"
+    fi
+  fi
+  local download_url
+  if [ "$ddtest_version" = "latest" ]; then
+    download_url="$DDTEST_RELEASES_URL/latest/download"
   else
-      module_resolution_status=$?
-  fi
-  if [ $module_resolution_status -eq 1 ]; then
-      return 1
-  fi
-  if [ $module_resolution_status -ne 0 ] || [ -z "$go_module_dir" ]; then
-      if [ $module_resolution_status -eq 2 ]; then
-          >&2 echo "Could not find a go.mod file in the current directory or any nested directory."
-      else
-          >&2 echo "Could not determine a single Go module directory automatically."
-          >&2 echo "Set DD_CIVISIBILITY_GO_MODULE_DIR to the Go module root if this repository contains multiple Go modules."
-      fi
-      >&2 echo "Skipping orchestrion installation."
-      return 0
+    download_url="$DDTEST_RELEASES_URL/download/$ddtest_version"
   fi
 
-  # The selected orchestrion release defines the minimum tracer version we can
-  # use safely. We never choose anything older than this baseline.
-  local minimum_dd_trace_go_version
-  minimum_dd_trace_go_version=$(get_orchestrion_module_version "$resolved_orchestrion_tag" "github.com/DataDog/dd-trace-go/v2" || true)
-  if [ $? -ne 0 ] || [ -z "$minimum_dd_trace_go_version" ]; then
-      >&2 echo "Error: Could not retrieve the dd-trace-go version for orchestrion (tag: $resolved_orchestrion_tag)."
-      return 1
+  local filepath_ddtest
+  filepath_ddtest="$ARTIFACTS_FOLDER/ddtest"
+  if [[ "$asset" == *.exe ]]; then
+    filepath_ddtest="$filepath_ddtest.exe"
   fi
+  local filepath_checksums
+  filepath_checksums="$ARTIFACTS_FOLDER/ddtest.SHA256SUMS"
 
-  # The shipped minimum tracer version can itself require a newer Go version
-  # through its orchestrion/all module. We use this requirement as the hard
-  # lower bound for deciding whether a project can be instrumented at all.
-  local minimum_dd_trace_go_required_go_version
-  minimum_dd_trace_go_required_go_version=$(get_dd_trace_go_orchestrion_all_go_version "$minimum_dd_trace_go_version" || true)
-  if [ $? -ne 0 ] || [ -z "$minimum_dd_trace_go_required_go_version" ]; then
-      >&2 echo "Error: Could not retrieve the Go requirement for dd-trace-go $minimum_dd_trace_go_version."
-      return 1
+  if ! download_file "$download_url/SHA256SUMS" "$filepath_checksums" >&2; then
+    rm -f "$filepath_checksums"
+    >&2 echo "Error: Could not download $download_url/SHA256SUMS."
+    return 1
   fi
-
-  # The runner also needs to satisfy the minimum tracer requirement. This check
-  # is stricter than the earlier orchestrion root go.mod check and protects the
-  # fallback path if the tracer bundle starts requiring a newer Go version than
-  # orchestrion's root module declares.
-  if ! version_ge "$installed_go_version" "$minimum_dd_trace_go_required_go_version"; then
-      >&2 echo "The installed Go version ($installed_go_version) is lower than the minimum Go version required by dd-trace-go $minimum_dd_trace_go_version ($minimum_dd_trace_go_required_go_version)."
-      >&2 echo "Skipping orchestrion installation."
-      return 0
-  fi
-
-  # Use the lower of the project's Go directive and the runner's installed Go
-  # version as the compatibility ceiling. This keeps the selected tracer inside
-  # the Go version already declared by the project and also avoids picking a
-  # module that the current runner cannot build.
-  local selected_dd_trace_go_version
-  selected_dd_trace_go_version="$minimum_dd_trace_go_version"
-
-  # Prefer the newest compatible tracer when we can read the project's Go
-  # version from the selected module root. If that information is unavailable
-  # or does not lead to a compatible release, fall back to the minimum tracer
-  # version that shipped with orchestrion so the script still avoids floating to
-  # an unsupported `dd-trace-go@latest`.
-  local project_go_version
-  if project_go_version=$(get_current_project_go_version "$go_module_dir/go.mod"); then
-      # If the project itself declares a Go version below the minimum required by
-      # the shipped tracer, do not fall back to that tracer. Skipping here avoids
-      # letting `orchestrion pin` silently move the project to a newer Go level.
-      if ! version_ge "$project_go_version" "$minimum_dd_trace_go_required_go_version"; then
-          >&2 echo "The project Go version ($project_go_version) is lower than the minimum Go version required by dd-trace-go $minimum_dd_trace_go_version ($minimum_dd_trace_go_required_go_version)."
-          >&2 echo "Skipping orchestrion installation."
-          return 0
-      fi
-
-      local max_supported_go_version
-      max_supported_go_version=$(version_min "$project_go_version" "$installed_go_version")
-
-      # Choose the newest stable tracer release that satisfies the two
-      # boundaries: it must be at least the version shipped with orchestrion,
-      # and its orchestrion/all module must support the effective Go ceiling
-      # computed above.
-      local compatible_dd_trace_go_version
-      if compatible_dd_trace_go_version=$(select_dd_trace_go_version_for_project "$minimum_dd_trace_go_version" "$max_supported_go_version" "$go_module_dir"); then
-          selected_dd_trace_go_version="$compatible_dd_trace_go_version"
-      else
-          >&2 echo "Could not find a project-compatible stable dd-trace-go release for Go $max_supported_go_version."
-          >&2 echo "Falling back to the minimum dd-trace-go version shipped with orchestrion: $minimum_dd_trace_go_version."
-      fi
-  else
-      >&2 echo "Could not read the project Go version from $go_module_dir/go.mod."
-      >&2 echo "Falling back to the minimum dd-trace-go version shipped with orchestrion: $minimum_dd_trace_go_version."
-  fi
-
-  # Install the requested orchestrion CLI version in GOPATH/bin so the later
-  # `orchestrion pin` command runs with the same release we just resolved.
-  if ! go install github.com/DataDog/orchestrion@$resolved_orchestrion_tag >&2; then
-    >&2 echo "Error: Could not install orchestrion for Go."
+  local checksum
+  checksum=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$filepath_checksums")
+  rm -f "$filepath_checksums"
+  if [ -z "$checksum" ]; then
+    >&2 echo "Error: The ddtest release at $download_url has no $asset."
     return 1
   fi
 
-  # Pin dd-trace-go only after the orchestrion CLI is available so install
-  # failures do not leave the customer's go.mod partially updated.
-  if ! (cd "$go_module_dir" && go mod edit -require=github.com/DataDog/dd-trace-go/v2@$selected_dd_trace_go_version) >&2; then
-    >&2 echo "Error: Could not pin dd-trace-go for Go to version $selected_dd_trace_go_version."
+  # The go shims of an earlier installation link to filepath_ddtest, so the
+  # new executable is downloaded and checked beside it and then renamed over
+  # it: a failed download or a checksum mismatch keeps the installed one.
+  local filepath_download
+  filepath_download="$filepath_ddtest.download.$$"
+  if ! download_file "$download_url/$asset" "$filepath_download" >&2; then
+    rm -f "$filepath_download"
+    >&2 echo "Error: Could not download $download_url/$asset."
+    return 1
+  fi
+  if ! verify_checksum "$checksum" "$filepath_download" >&2; then
+    rm -f "$filepath_download"
+    >&2 echo "Error: $asset does not match the checksum in the ddtest release."
+    return 1
+  fi
+  if ! { chmod +x "$filepath_download" && mv -f "$filepath_download" "$filepath_ddtest"; }; then
+    rm -f "$filepath_download"
+    >&2 echo "Error: Could not install ddtest in $filepath_ddtest."
     return 1
   fi
 
-  # Generate/update orchestrion.tool.go and the project dependencies. At this
-  # point dd-trace-go is already pinned in go.mod, so orchestrion will reuse
-  # that version instead of upgrading to the latest tracer release.
-  if ! (cd "$go_module_dir" && orchestrion pin) >&2; then
-    >&2 echo "Error: Orchestrion pin failed."
+  # With --go-shim, ddtest runs a command with a go of its own first on PATH:
+  # that go runs go test through ddtest instrument and every other go command
+  # unchanged. Without --go-shim, ddtest takes its go shims off PATH, so the
+  # second command finds the toolchain's go. If ddtest cannot set the shim up,
+  # it warns and runs the command without it, and both commands print the same
+  # go.
+  local go_shim
+  local toolchain_go
+  if ! go_shim=$("$filepath_ddtest" instrument --go-shim sh -c 'command -v go') ||
+     ! toolchain_go=$("$filepath_ddtest" instrument sh -c 'command -v go') ||
+     [ -z "$go_shim" ] || [ "$go_shim" = "$toolchain_go" ]; then
+    >&2 echo "Error: ddtest could not set up its go command for Go instrumentation."
     return 1
   fi
 
-  # Update the module graph with the selected orchestrion dependency while
-  # keeping the version fixed to the same concrete tag used above.
-  if ! (cd "$go_module_dir" && go get github.com/DataDog/orchestrion@$resolved_orchestrion_tag) >&2; then
-    >&2 echo "Error: go get github.com/DataDog/orchestrion@$resolved_orchestrion_tag failed."
-    return 1
+  # Putting ddtest's go first on PATH makes the go test that a job runs, also
+  # from make or a script, report to Test Optimization, without changing the
+  # project's go.mod or the job's commands.
+  local go_shim_dir
+  go_shim_dir=$(dirname "$go_shim")
+  # The printed PATH serves a shell that exports the output. In GitHub Actions,
+  # the job's next steps get the directories that GITHUB_PATH lists, such as
+  # setup-go's, before the PATH that GITHUB_ENV sets, so the directory goes to
+  # GITHUB_PATH too, last and so first on PATH. On Windows, Git Bash's PATH has
+  # POSIX paths, which the next steps cannot use through GITHUB_ENV, so there
+  # the script prints no PATH and only the next steps get the directory.
+  if [ -n "${GITHUB_PATH:-}" ]; then
+    local github_path_entry="$go_shim_dir"
+    if [[ "$asset" == *.exe ]]; then
+      github_path_entry=$(cygpath -w "$go_shim_dir")
+    fi
+    echo "$github_path_entry" >> "$GITHUB_PATH"
+    >&2 echo "Added ddtest's go command to PATH for the next steps: $github_path_entry"
   fi
-
-  # Append orchestrion to the GOFLAGS variable to enable Test Optimization.
-  echo "GOFLAGS=${GOFLAGS} '-toolexec=orchestrion toolexec'"
-
-  # Retrieve orchestrion version and extract only the version part.
-  local orchestrion_output
-  orchestrion_output=$(orchestrion version 2>/dev/null || echo "orchestrion vlatest")
-  # The output is expected to be like: "orchestrion v1.0.2"
-  local orchestrion_version
-  orchestrion_version=$(echo "$orchestrion_output" | awk '{print $2}')
-  echo "DD_TRACER_VERSION_GO=${orchestrion_version}"
+  if [ -z "${GITHUB_PATH:-}" ] || [[ "$asset" != *.exe ]]; then
+    echo "PATH=$go_shim_dir:$PATH"
+  fi
+  echo "DD_TRACER_VERSION_GO=$("$filepath_ddtest" --version)"
 }
 
 # set common environment variables

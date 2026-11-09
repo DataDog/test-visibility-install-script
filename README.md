@@ -32,8 +32,7 @@ The script parameters are
 - `DD_SET_TRACER_VERSION_JS`: (optional) Version of the JS tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_PYTHON`: (optional) Version of the Python tracer to install. If not provided, the latest version is installed.
 - `DD_SET_TRACER_VERSION_RUBY`: (optional) Version of the Ruby datadog-ci gem to install. If not provided, the latest version is installed.
-- `DD_SET_TRACER_VERSION_GO`: (optional) Version of Orchestrion to install. If not provided, the latest version is installed.
-- `DD_CIVISIBILITY_GO_MODULE_DIR`: (optional) Directory that contains the Go project's `go.mod` file. Use this when the Go module is not at the repository root or when the repository contains multiple Go modules.
+- `DD_SET_TRACER_VERSION_GO`: (optional) Version of [ddtest](https://github.com/DataDog/ddtest) to install for Go, such as `v1.16.0`; `v1.14.0` is the oldest supported. If not provided, the latest release is installed. This variable used to select an Orchestrion version: a value that names no ddtest release from `v1.14.0` on, such as an earlier Orchestrion version or commit, installs the latest ddtest with a warning. Update pinned values, because a number such as `v1.15.0` now names a ddtest release. See [Tracing Go tests](#tracing-go-tests).
 - `DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA`: (optional) A hint for Java instrumentation to instrument a specific build system. Allowed values are `maven`, `gradle`, `sbt`, `ant`, and `all`. If not specified, every Maven, Gradle, SBT, and Ant build will be instrumented. `all` is a special value that allows instrumenting _every JVM process_.
 
 The script will install the libraries and print the list of environment variables that should be set in order to enable Test Optimization. Example output:
@@ -56,6 +55,16 @@ done < <(DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=[...] DD_API_KEY=[...] ./inst
 ```
 
 ## Limitations
+
+### Tracing Go tests
+
+Go tests report through [`ddtest instrument`](https://github.com/DataDog/ddtest/blob/main/ddto/README.md). The script downloads ddtest into `DD_TRACER_FOLDER` and checks it against the release's `SHA256SUMS`. It then puts ddtest's `go` command first on `PATH`: that `go` runs `go test` through `ddtest instrument`, also when `make` or a script starts it, and runs every other `go` command unchanged. The script no longer edits `go.mod` or sets `GOFLAGS`.
+
+- The script prints `PATH` with that directory first. In GitHub Actions it also adds the directory to `GITHUB_PATH`, because the job's next steps get the directories listed there, such as `actions/setup-go`'s, before a `PATH` set through `GITHUB_ENV`. On Windows in GitHub Actions it prints no `PATH`, since Git Bash's `PATH` has POSIX paths that later steps cannot use: there, only the job's next steps get the directory, not the step that runs the script.
+- The runner needs Go 1.25 or newer on `PATH`; with an older toolchain the script prints a warning, skips Go and lets the job continue. The project's `go.mod` can still declare an older Go version.
+- Linux, macOS and Windows, from Git Bash, on `amd64` and `arm64` are supported; elsewhere the script skips Go with a warning.
+- Tests must run on the same machine or container and as the same user as the script, since ddtest's `go` command lives in that user's cache directory: a Docker container action that runs the tests does not find it. No later step may put another `go` before ddtest's on `PATH`, such as installing Go again after running the script; otherwise `go test` runs without Test Optimization.
+- With Test Impact Analysis enabled, build the tests with coverage in count or atomic mode, such as `go test -cover -covermode=atomic ./...`, so each test reports the code it ran.
 
 ### Tracing vitest tests
 
