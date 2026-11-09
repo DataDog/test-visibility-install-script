@@ -248,14 +248,13 @@ install_js_tracer() {
   # Github Actions prohibit setting NODE_OPTIONS
   local dd_trace_ci_init_path="$global_node_modules/dd-trace/ci/init"
   local dd_trace_register_path="$global_node_modules/dd-trace/register.js"
-  # A path that still has a space goes in double quotes, which NODE_OPTIONS
-  # reads; inside them a backslash escapes the next character, so a Windows
-  # path uses forward slashes there.
-  if [[ "$dd_trace_ci_init_path" == *" "* ]]; then
-    if [ "$is_windows" = true ]; then
-      dd_trace_ci_init_path=$(cygpath -m "$dd_trace_ci_init_path")
-    fi
-    dd_trace_ci_init_path="\"$dd_trace_ci_init_path\""
+  # Without 8.3 names, the Windows path goes in double quotes, which
+  # NODE_OPTIONS reads; inside them a backslash escapes the next character,
+  # so it uses forward slashes there. Linux and macOS print the path as is:
+  # the CircleCI orb writes every value in double quotes to BASH_ENV, which
+  # quotes inside the value would break.
+  if [ "$is_windows" = true ] && [[ "$dd_trace_ci_init_path" == *" "* ]]; then
+    dd_trace_ci_init_path="\"$(cygpath -m "$dd_trace_ci_init_path")\""
   fi
   if ! is_github_actions; then
     echo "NODE_OPTIONS=$NODE_OPTIONS -r $dd_trace_ci_init_path"
@@ -263,9 +262,9 @@ install_js_tracer() {
     echo "DD_TRACE_PACKAGE=$dd_trace_ci_init_path"
   fi
   # Node's --import takes a URL or a specifier, and reads a Windows path such
-  # as D:\a\register.js as a URL with the scheme d:, so Windows gets a file URL.
-  # So does a path with a space, which a file URL encodes as %20.
-  if [ "$is_windows" = true ] || [[ "$dd_trace_register_path" == *" "* ]]; then
+  # as D:\a\register.js as a URL with the scheme d:, so Windows gets a file URL,
+  # where a space is %20.
+  if [ "$is_windows" = true ]; then
     if ! dd_trace_register_path=$(node -e 'console.log(require("url").pathToFileURL(process.argv[1]).href)' "$dd_trace_register_path"); then
       >&2 echo "Error: Could not build the file URL of $dd_trace_register_path"
       return 1
@@ -292,22 +291,38 @@ is_node_version_compliant() {
 }
 
 # Download URL $1 to file $2 and print the HTTP status of the last response,
-# after redirects, or nothing (000 from curl) when no response arrived.
-# download_file's exit status cannot tell a missing file from other HTTP
-# errors: curl -f exits 22, and wget 8, for every one of them.
+# after redirects, or 000 when no complete response arrived, as when the
+# network fails or the transfer stops early. download_file's exit status
+# cannot tell a missing file from other HTTP errors: curl -f exits 22, and
+# wget 8, for every one of them.
 download_with_status() {
   if command -v curl >/dev/null 2>&1; then
-    curl -sSL -o "$2" -w '%{http_code}' "$1" || true
+    # Without -f, curl exits 0 for an HTTP error, so a failure is a transfer
+    # that did not complete.
+    local curl_status
+    if curl_status=$(curl -sSL -o "$2" -w '%{http_code}' "$1"); then
+      echo "$curl_status"
+    else
+      echo "000"
+    fi
   elif command -v wget >/dev/null 2>&1; then
     # GNU wget prints each response's status line with -S, and BusyBox's
     # prints an error's as "server returned error: HTTP/1.1 404 ...". Its
     # messages go through a file to stderr: tee /dev/stderr would reopen, and
     # truncate, a stderr redirected to a file.
+    # wget also fails for an HTTP error, so a failure with a 2xx status is a
+    # transfer that did not complete.
     local wget_log="$2.wget-log"
-    wget -S -O "$2" "$1" 2> "$wget_log" || true
+    local wget_exit=0
+    wget -S -O "$2" "$1" 2> "$wget_log" || wget_exit=$?
     cat "$wget_log" >&2
-    awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }' "$wget_log"
+    local wget_status
+    wget_status=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }' "$wget_log")
     rm -f "$wget_log"
+    if [ "$wget_exit" -ne 0 ] && { [ -z "$wget_status" ] || [[ "$wget_status" == 2?? ]]; }; then
+      wget_status="000"
+    fi
+    echo "$wget_status"
   else
     >&2 echo "Error: Neither wget nor curl is installed."
   fi

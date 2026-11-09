@@ -229,6 +229,12 @@ case "$url" in
         printf '%s *ddtest-windows-amd64.exe\n' "$checksum"
       fi
     } > "$output"
+    # A response whose status and checksums arrived, but not its end: curl
+    # still prints the status and exits 18.
+    if [ "${FAKE_TRUNCATED_SUMS:-0}" = "1" ]; then
+      [ -z "$write_out" ] || printf '200'
+      exit 18
+    fi
     ;;
   https://github.com/DataDog/ddtest/releases/*/ddtest-linux-amd64 | https://github.com/DataDog/ddtest/releases/*/ddtest-windows-amd64.exe)
     if [ "${FAKE_FAIL_ASSET_DOWNLOAD:-0}" = "1" ]; then
@@ -712,9 +718,14 @@ use_wget_instead_of_curl() {
 # download_with_status runs wget -S -O <file> <url>, which prints the
 # response's status line on stderr; the fake curl downloads and reports it.
 if [ "${1:-}" = "-S" ]; then
-  code="$("$(dirname "$0")/fake-download" -o "$3" -w '%{http_code}' "$4" || true)"
+  transfer=0
+  code="$("$(dirname "$0")/fake-download" -o "$3" -w '%{http_code}' "$4")" || transfer=$?
   if [ -n "$code" ] && [ "$code" != "000" ]; then
     echo "  HTTP/1.1 $code Fake" >&2
+  fi
+  # wget exits 4 when the network fails, also during a transfer.
+  if [ "$transfer" -ne 0 ]; then
+    exit 4
   fi
   [ "$code" = "200" ] && exit 0 || exit 8
 fi
@@ -826,6 +837,34 @@ scenario_wget_pinned_release_server_error() {
   assert_go_not_instrumented
 }
 
+# Validate that a SHA256SUMS transfer that stops early, after its status and
+# checksums arrived, is an error.
+scenario_truncated_checksums() {
+  prepare_case "truncated_checksums"
+
+  run_install_script FAKE_TRUNCATED_SUMS=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/latest/download/SHA256SUMS."
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "ddtest-linux-amd64"
+  assert_go_not_instrumented
+}
+
+# Validate the same with wget.
+scenario_wget_truncated_checksums() {
+  prepare_case "wget_truncated_checksums"
+  use_wget_instead_of_curl
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    FAKE_TRUNCATED_SUMS=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/latest/download/SHA256SUMS."
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "ddtest-linux-amd64"
+  assert_go_not_instrumented
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -837,6 +876,8 @@ main() {
   run_case "wget_missing_release_installs_latest" scenario_wget_missing_release_installs_latest
   run_case "pinned_release_rate_limited" scenario_pinned_release_rate_limited
   run_case "wget_pinned_release_server_error" scenario_wget_pinned_release_server_error
+  run_case "truncated_checksums" scenario_truncated_checksums
+  run_case "wget_truncated_checksums" scenario_wget_truncated_checksums
   run_case "busybox_sha256sum" scenario_busybox_sha256sum
   run_case "busybox_sha256sum_mismatch" scenario_busybox_sha256sum_mismatch
   run_case "runner_go_below_minimum" scenario_runner_go_below_minimum

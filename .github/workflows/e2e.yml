@@ -92,9 +92,11 @@ jobs:
       - name: Install and run tests in one shell
         run: tests/e2e/run.sh ${{ matrix.language }} shell
 
-      # Users append the JS tracer's paths to NODE_OPTIONS without quotes.
+      # Users append the JS tracer's paths to NODE_OPTIONS without quotes, so
+      # on Windows the installer prints them in 8.3 form or quoted; Linux and
+      # macOS do not support a folder with spaces for JS.
       - name: Install and run tests in one shell, from a tracer folder with spaces
-        if: matrix.language == 'js'
+        if: matrix.language == 'js' && matrix.os == 'windows-latest'
         run: E2E_TRACER_FOLDER="$RUNNER_TEMP/tracer folder" tests/e2e/run.sh js shell
 
       # Then as the GitHub action consumes it: the output goes to GITHUB_ENV,
