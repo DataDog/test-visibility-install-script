@@ -276,6 +276,20 @@ is_node_version_compliant() {
   fi
 }
 
+# Print the HTTP status of the last response for a URL, after redirects, or
+# nothing (or 000 from curl) when no response arrived. download_file's exit
+# status cannot tell a missing file from other HTTP errors: curl -f exits 22,
+# and wget 8, for every one of them.
+http_status() {
+  if command -v curl >/dev/null 2>&1; then
+    curl -s -o /dev/null -L -w '%{http_code}' "$1" || true
+  elif command -v wget >/dev/null 2>&1; then
+    # GNU wget prints each response's status line with -S, and BusyBox's
+    # prints the final error as "server returned error: HTTP/1.1 404 ...".
+    wget -S --spider "$1" 2>&1 | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }'
+  fi
+}
+
 is_github_actions() {
   if [ -z "$GITHUB_ACTION" ]; then
     return 1
@@ -616,13 +630,6 @@ install_go_tracer() {
   local filepath_checksums
   filepath_checksums="$ARTIFACTS_FOLDER/ddtest.SHA256SUMS"
 
-  # download_file runs curl when it can, else wget. Each reports that the
-  # server answered with an error, such as 404, with its own exit status:
-  # 22 from curl -f, 8 from wget. For curl, 8 is a reply it could not parse.
-  local server_error_status=22
-  if ! command -v curl >/dev/null 2>&1; then
-    server_error_status=8
-  fi
   local download_url
   local download_status
   while true; do
@@ -633,10 +640,12 @@ install_go_tracer() {
     fi
     download_status=0
     download_file "$download_url/SHA256SUMS" "$filepath_checksums" >&2 || download_status=$?
-    # The server answered with an error for a pinned release: the release does
-    # not exist, as with a version number that ddtest never published, so the
-    # latest ddtest is installed instead. Network failures stay errors.
-    if [ "$ddtest_version" != "latest" ] && [ "$download_status" -eq "$server_error_status" ]; then
+    # A pinned release whose SHA256SUMS the server does not find does not
+    # exist, as with a version number that ddtest never published, so the
+    # latest ddtest is installed instead. Any other failure, such as a network
+    # error or an HTTP 429 or 503, stays an error and keeps the pin.
+    if [ "$ddtest_version" != "latest" ] && [ "$download_status" -ne 0 ] &&
+       [ "$(http_status "$download_url/SHA256SUMS")" = "404" ]; then
       >&2 echo "$unusable_version_warning"
       ddtest_version="latest"
       continue

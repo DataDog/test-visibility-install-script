@@ -168,17 +168,47 @@ DDTEST
 #!/bin/bash
 set -euo pipefail
 
-# download_file runs curl -fLo <file> <url>.
+# download_file runs curl -fLo <file> <url>, and http_status runs
+# curl -s -o /dev/null -L -w '%{http_code}' <url>.
 url="${@: -1}"
 output="${@: -2:1}"
+write_out=""
+while [ $# -gt 1 ]; do
+  if [ "$1" = "-w" ]; then
+    write_out="$2"
+  fi
+  shift
+done
 printf '%s\n' "$url" >> "$FAKE_LOG_DIR/curl.log"
+
+missing_release=0
+if [ -n "${FAKE_MISSING_RELEASE:-}" ] && [[ "$url" == */download/"$FAKE_MISSING_RELEASE"/* ]]; then
+  missing_release=1
+fi
+
+# The HTTP status of the response: 000 when the network fails, 404 for a
+# missing release, FAKE_HTTP_STATUS (500 by default) for the server errors
+# that FAKE_FAIL_DOWNLOADS makes, else 200.
+if [ "$write_out" = "%{http_code}" ]; then
+  if [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ] && [ "${FAKE_DOWNLOAD_EXIT:-22}" != "22" ]; then
+    printf '000'
+    exit "$FAKE_DOWNLOAD_EXIT"
+  elif [ "$missing_release" = "1" ]; then
+    printf '404'
+  elif [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ]; then
+    printf '%s' "${FAKE_HTTP_STATUS:-500}"
+  else
+    printf '200'
+  fi
+  exit 0
+fi
 
 # curl -f exits 22 when the server answers with an error, such as 404 for a
 # release that does not exist, and with other codes when the network fails.
 if [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ]; then
   exit "${FAKE_DOWNLOAD_EXIT:-22}"
 fi
-if [ -n "${FAKE_MISSING_RELEASE:-}" ] && [[ "$url" == */download/"$FAKE_MISSING_RELEASE"/* ]]; then
+if [ "$missing_release" = "1" ]; then
   exit 22
 fi
 
@@ -674,6 +704,15 @@ use_wget_instead_of_curl() {
   mv "$CURRENT_CASE_DIR/bin/curl" "$CURRENT_CASE_DIR/bin/fake-download"
   cat > "$CURRENT_CASE_DIR/bin/wget" <<'EOF_WGET'
 #!/bin/bash
+# http_status runs wget -S --spider <url>, which prints the response's status
+# line on stderr; ask the fake curl for that status.
+if [ "${2:-}" = "--spider" ]; then
+  code="$("$(dirname "$0")/fake-download" -w '%{http_code}' "${@: -1}" || true)"
+  if [ "$code" != "000" ]; then
+    echo "  HTTP/1.1 $code Fake" >&2
+  fi
+  [ "$code" = "200" ] && exit 0 || exit 8
+fi
 # download_file runs wget -O <file> <url>, which the fake curl also reads.
 status=0
 "$(dirname "$0")/fake-download" "$@" || status=$?
@@ -749,6 +788,36 @@ scenario_busybox_sha256sum_mismatch() {
   assert_go_not_instrumented
 }
 
+# Validate that an HTTP error other than 404 for a pinned release, such as 429
+# from a rate limit, keeps the pin and fails instead of installing latest.
+scenario_pinned_release_rate_limited() {
+  prepare_case "pinned_release_rate_limited"
+
+  run_install_script DD_SET_TRACER_VERSION_GO=v1.16.0 FAKE_FAIL_DOWNLOADS=1 FAKE_HTTP_STATUS=429
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/latest/"
+  assert_go_not_instrumented
+}
+
+# Validate the same with wget, whose exit status is 8 for every HTTP error.
+scenario_wget_pinned_release_server_error() {
+  prepare_case "wget_pinned_release_server_error"
+  use_wget_instead_of_curl
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    DD_SET_TRACER_VERSION_GO=v1.16.0 \
+    FAKE_FAIL_DOWNLOADS=1 \
+    FAKE_HTTP_STATUS=503
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/latest/"
+  assert_go_not_instrumented
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -758,6 +827,8 @@ main() {
   run_case "pinned_release_network_failure" scenario_pinned_release_network_failure
   run_case "pinned_release_unparseable_reply" scenario_pinned_release_unparseable_reply
   run_case "wget_missing_release_installs_latest" scenario_wget_missing_release_installs_latest
+  run_case "pinned_release_rate_limited" scenario_pinned_release_rate_limited
+  run_case "wget_pinned_release_server_error" scenario_wget_pinned_release_server_error
   run_case "busybox_sha256sum" scenario_busybox_sha256sum
   run_case "busybox_sha256sum_mismatch" scenario_busybox_sha256sum_mismatch
   run_case "runner_go_below_minimum" scenario_runner_go_below_minimum
