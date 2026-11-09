@@ -4,6 +4,11 @@
 #   tests/e2e/run.sh <language> shell
 #   tests/e2e/run.sh <language> github-install   (in a GitHub Actions step)
 #   tests/e2e/run.sh <language> github-test      (in a later step of that job)
+#   tests/e2e/run.sh <language> gitlab
+#   tests/e2e/run.sh <language> circleci
+#   tests/e2e/run.sh <language> prepare                     (E2E_PROJECT)
+#   tests/e2e/run.sh <language> patch-github-action <dir>
+#   tests/e2e/run.sh <language> test                        (E2E_PROJECT)
 #
 # Each run builds a small project with one passing test for the language, runs
 # the installer from the project, runs the project's tests with what the
@@ -11,24 +16,37 @@
 # test's name (DdE2eMarker), reached a local stand-in for Datadog's intake
 # (tests/e2e/intake.py). No backend or real API key is needed.
 #
-# shell consumes the installer's output as the README shows, the way the
-# GitLab script and the CircleCI orb do: it exports every printed variable in
-# the same shell, outside GitHub Actions. github-install consumes it as the
-# GitHub action does, appending it to GITHUB_ENV, and github-test then runs the
-# tests in the job's next step, which also gets what the installer added to
-# GITHUB_PATH.
+# The modes consume the installer's output as its users do:
+#
+# - shell exports every printed variable in the same shell, as the README
+#   shows, outside GitHub Actions.
+# - github-install appends the output to GITHUB_ENV, as the GitHub action does,
+#   and github-test runs the tests in the job's next step, which also gets what
+#   the installer added to GITHUB_PATH.
+# - gitlab and circleci run the real wrappers, the GitLab script
+#   (E2E_GITLAB_SCRIPT, its script.sh) and the CircleCI orb's script
+#   (E2E_CIRCLECI_SCRIPT, its src/scripts/autoinstrument.sh), as those CI
+#   systems do, with only the installer's URL and checksum changed to this
+#   installer, which the intake serves.
+# - prepare, patch-github-action and test run the real GitHub action across a
+#   job's steps: prepare writes the project in E2E_PROJECT, the workspace that
+#   the action installs from; patch-github-action points a checkout of the
+#   action at this installer; a later step uses the action; test then runs the
+#   tests.
 #
 # Languages: go, python, js, java, dotnet, ruby. The runner needs the
 # language's toolchain: Go 1.25 or newer, Python with venv, Node.js with npm,
-# a JDK with Maven, the .NET SDK, or Ruby with Bundler. E2E_DIR (default
-# $RUNNER_TEMP/dd-e2e, else a new temporary directory) holds the projects.
+# a JDK with Maven, the .NET SDK, or Ruby with Bundler; and Python for the
+# intake. E2E_DIR (default $RUNNER_TEMP/dd-e2e, else a new temporary
+# directory) holds the projects and the intake's files.
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 installer="${INSTALLER_UNDER_TEST:-$repo_root/install_test_visibility.sh}"
-language="${1:?usage: run.sh <language> shell|github-install|github-test}"
-mode="${2:?usage: run.sh <language> shell|github-install|github-test}"
+usage="usage: run.sh <language> shell|github-install|github-test|gitlab|circleci|prepare|patch-github-action <dir>|test"
+language="${1:?$usage}"
+mode="${2:?$usage}"
 
 fail() {
   echo "FAIL ($language, $mode): $*" >&2
@@ -48,8 +66,8 @@ elif [ -n "${RUNNER_TEMP:-}" ]; then
 else
   E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dd-e2e.XXXXXX")"
 fi
-project="$E2E_DIR/$language-$mode"
-if [ "$mode" = "github-test" ]; then
+project="${E2E_PROJECT:-$E2E_DIR/$language-$mode}"
+if [ "$mode" = "github-test" ] && [ -z "${E2E_PROJECT:-}" ]; then
   project="$E2E_DIR/$language-github-install"
 fi
 
@@ -60,8 +78,17 @@ is_windows() {
   esac
 }
 
-# The settings that every run uses: delivery goes to the local intake, which
-# run_tests starts, with a placeholder API key.
+# Print the SHA-256 digest of a file.
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum < "$1" | cut -d ' ' -f 1
+  else
+    shasum -a 256 < "$1" | cut -d ' ' -f 1
+  fi
+}
+
+# The settings that every run uses: delivery goes to the local intake, with a
+# placeholder API key.
 export DD_API_KEY=dummy
 export DD_SERVICE="install-script-e2e-$language"
 export DD_CIVISIBILITY_GIT_UPLOAD_ENABLED=false
@@ -221,9 +248,13 @@ project_tests() {
   esac
 }
 
-# Start the intake, run the tests and check that their events arrived.
-run_tests() {
-  local intake_dir="$E2E_DIR/intake-$language-$mode"
+intake_dir="$E2E_DIR/intake-$language-$mode"
+intake_pid=""
+intake_url=""
+
+# Start the intake, which also serves this installer at
+# $intake_url/install_test_visibility.sh for the wrappers to download.
+start_intake() {
   rm -rf "$intake_dir"
   mkdir -p "$intake_dir"
   local python_bin=""
@@ -236,9 +267,9 @@ run_tests() {
   [ -n "$python_bin" ] || fail "the intake needs Python"
   # Without the step's output streams: on Windows, a background process that
   # holds them keeps the GitHub Actions step running.
-  "$python_bin" "$repo_root/tests/e2e/intake.py" "$intake_dir/port" "$intake_dir/requests.log" \
+  "$python_bin" "$repo_root/tests/e2e/intake.py" "$intake_dir/port" "$intake_dir/requests.log" "$installer" \
     > "$intake_dir/intake.out" 2>&1 &
-  local intake_pid=$!
+  intake_pid=$!
   # shellcheck disable=SC2064
   trap "kill $intake_pid 2>/dev/null || true" EXIT
   local _
@@ -252,8 +283,29 @@ run_tests() {
     cat "$intake_dir/intake.out" >&2 2>/dev/null || true
     fail "the intake did not start"
   fi
-  DD_CIVISIBILITY_AGENTLESS_URL="http://127.0.0.1:$(cat "$intake_dir/port")"
+  intake_url="http://127.0.0.1:$(cat "$intake_dir/port")"
+  DD_CIVISIBILITY_AGENTLESS_URL="$intake_url"
   export DD_CIVISIBILITY_AGENTLESS_URL
+}
+
+# Print the project's files, the installer's own folder aside.
+project_files() {
+  local file
+  for file in * .[!.]*; do
+    if [ -e "$file" ] && [ "$file" != ".datadog" ]; then
+      printf '%s\n' "$file"
+    fi
+  done
+}
+
+# Run the tests, with the intake started if it is not yet, and check that
+# their events arrived.
+run_tests() {
+  if [ -z "$intake_pid" ]; then
+    start_intake
+  fi
+  local files_before
+  files_before="$(project_files)"
 
   if [ "$language" = "python" ]; then
     activate_python_venv
@@ -264,8 +316,10 @@ run_tests() {
     fail "the project's tests failed with the installer's environment"
   fi
 
-  # The test's own event names it; a session or module event does not.
-  if ! grep -a -q 'DdE2eMarker' "$intake_dir/requests.log.payloads" 2>/dev/null; then
+  # The test's own event names it; a session or module event does not. The
+  # payloads are binary: BusyBox's grep, on Alpine, matches bytes that are not
+  # UTF-8 only in the C locale.
+  if ! LC_ALL=C grep -a -q 'DdE2eMarker' "$intake_dir/requests.log.payloads" 2>/dev/null; then
     cat "$test_log" >&2
     echo "--- requests that reached the intake:" >&2
     cat "$intake_dir/requests.log" >&2 2>/dev/null || echo "(none)" >&2
@@ -288,15 +342,9 @@ run_tests() {
       fail "a failing Go test must fail go test"
     fi
     [ "$(cat go.mod)" = "$go_mod" ] || fail "go.mod changed"
-    # The installer's own folder aside, the project keeps only its files.
-    local files=()
-    local file
-    for file in * .[!.]*; do
-      if [ -e "$file" ] && [ "$file" != ".datadog" ]; then
-        files+=("$file")
-      fi
-    done
-    [ "${files[*]}" = "e2e_test.go go.mod" ] || fail "the project's files changed: ${files[*]}"
+    # go test through ddtest leaves no file of its own in the project.
+    [ "$(project_files)" = "$files_before" ] ||
+      fail "go test changed the project's files: $(project_files | tr '\n' ' ')"
   fi
 
   kill "$intake_pid" 2>/dev/null || true
@@ -308,12 +356,17 @@ run_installer() {
   DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="$language" bash "$installer"
 }
 
+# Make an empty project directory, write the project in it and enter it.
+new_project() {
+  rm -rf "$project"
+  mkdir -p "$project"
+  cd "$project"
+  prepare_project
+}
+
 case "$mode" in
   shell)
-    rm -rf "$project"
-    mkdir -p "$project"
-    cd "$project"
-    prepare_project
+    new_project
     # Outside GitHub Actions, even when this test runs there.
     unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
     run_installer > "$E2E_DIR/$language-shell.env"
@@ -326,16 +379,82 @@ case "$mode" in
     ;;
   github-install)
     [ -n "${GITHUB_ENV:-}" ] || fail "github-install runs in a GitHub Actions step"
-    rm -rf "$project"
-    mkdir -p "$project"
-    cd "$project"
-    prepare_project
+    new_project
     run_installer > "$E2E_DIR/$language-github.env"
     cat "$E2E_DIR/$language-github.env" >> "$GITHUB_ENV"
     ;;
-  github-test)
-    [ -d "$project" ] || fail "github-install did not run"
+  github-test|test)
+    [ -d "$project" ] || fail "the project does not exist: $project"
     cd "$project"
+    run_tests
+    ;;
+  prepare)
+    # The workspace of a GitHub Actions job: write the project beside what is
+    # already there.
+    [ -n "${E2E_PROJECT:-}" ] || fail "prepare writes the project in E2E_PROJECT"
+    mkdir -p "$project"
+    cd "$project"
+    prepare_project
+    ;;
+  patch-github-action)
+    action_yml="${3:?$usage}/action.yml"
+    [ -f "$action_yml" ] || fail "no action.yml in $3"
+    # The action downloads the installer with curl, which reads file URLs.
+    installer_url="file://$installer"
+    if is_windows; then
+      installer_url="file:///$(cygpath -m "$installer")"
+    fi
+    installer_sum="$(sha256_of "$installer")"
+    sed -E -e "s|^( +INSTALLATION_SCRIPT_URL: ).*|\1$installer_url|" \
+      -e "s|^( +INSTALLATION_SCRIPT_CHECKSUM: ).*|\1$installer_sum|" \
+      "$action_yml" > "$action_yml.patched"
+    mv "$action_yml.patched" "$action_yml"
+    grep -Fq "INSTALLATION_SCRIPT_URL: $installer_url" "$action_yml" &&
+      grep -Fq "INSTALLATION_SCRIPT_CHECKSUM: $installer_sum" "$action_yml" ||
+      fail "could not point $action_yml at this installer"
+    echo "The action in $3 installs $installer_url"
+    ;;
+  gitlab)
+    [ -f "${E2E_GITLAB_SCRIPT:-}" ] || fail "E2E_GITLAB_SCRIPT must name the GitLab script's script.sh"
+    new_project
+    start_intake
+    installer_sum="$(sha256_of "$installer")"
+    gitlab_script="$E2E_DIR/$language-gitlab-script.sh"
+    sed -E -e "s|^installation_script_url=.*|installation_script_url=\"$intake_url/install_test_visibility.sh\"|" \
+      -e "s|^installation_script_checksum=.*|installation_script_checksum=\"$installer_sum\"|" \
+      "$E2E_GITLAB_SCRIPT" > "$gitlab_script"
+    grep -Fq "installation_script_url=\"$intake_url/install_test_visibility.sh\"" "$gitlab_script" &&
+      grep -Fq "installation_script_checksum=\"$installer_sum\"" "$gitlab_script" ||
+      fail "could not point the GitLab script at this installer"
+    unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
+    # As the script's README has a GitLab job do: source it into the job's
+    # shell, which then runs the tests. GitLab runs a job's script with -e,
+    # without -u.
+    set +u
+    # shellcheck disable=SC1090
+    LANGUAGES="$language" API_KEY=dummy source "$gitlab_script"
+    set -u
+    run_tests
+    ;;
+  circleci)
+    [ -f "${E2E_CIRCLECI_SCRIPT:-}" ] || fail "E2E_CIRCLECI_SCRIPT must name the orb's autoinstrument.sh"
+    new_project
+    start_intake
+    unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
+    BASH_ENV="$E2E_DIR/$language-circleci-bash-env"
+    : > "$BASH_ENV"
+    # The orb's command runs the script in a step of its own, with its
+    # parameters in the environment and CircleCI's bash -eo pipefail.
+    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="$language" \
+      INSTALLATION_SCRIPT_URL="$intake_url/install_test_visibility.sh" \
+      INSTALLATION_SCRIPT_CHECKSUM="$(sha256_of "$installer")" \
+      BASH_ENV="$BASH_ENV" \
+      bash -eo pipefail "$E2E_CIRCLECI_SCRIPT" || fail "the orb's script failed"
+    # Every later CircleCI step starts by sourcing BASH_ENV.
+    set +u
+    # shellcheck disable=SC1090
+    source "$BASH_ENV"
+    set -u
     run_tests
     ;;
   *)

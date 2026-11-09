@@ -1,12 +1,14 @@
 """A stand-in for Datadog's Test Optimization intake, for tests/e2e/run.sh.
 
-Usage: python intake.py <port file> <request log>
+Usage: python intake.py <port file> <request log> [installer]
 
 It listens on a free local port, writes that port to <port file> once it
 accepts connections, and appends "<method> <path>" for every request to
 <request log>. It appends the body of every test event request, gzip-decoded,
 to <request log>.payloads, where run.sh looks for the fixture's test name:
-msgpack and JSON both keep strings as UTF-8 bytes. The settings request gets every feature switched off, so the
+msgpack and JSON both keep strings as UTF-8 bytes. With an installer, it also
+serves that file at /install_test_visibility.sh, for the wrappers that
+download the installer from a URL. The settings request gets every feature switched off, so the
 libraries only report test events; every other request is accepted. run.sh
 stops it; it also stops by itself after MAX_LIFETIME_SECONDS, so a kill that
 fails cannot keep a CI job running.
@@ -85,6 +87,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._record()
+        if self.path == "/install_test_visibility.sh" and len(sys.argv) > 3:
+            with open(sys.argv[3], "rb") as installer:
+                data = installer.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/x-shellscript")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         self._reply(200, {})
 
     def log_message(self, *args):

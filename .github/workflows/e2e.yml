@@ -113,3 +113,221 @@ jobs:
           Write-Output "go: $go"
           if ($go -notlike '*go-shim*') { throw "go is $go, not ddtest's go command" }
           go env GOVERSION
+
+  # The real GitHub action, at a pinned commit, with only its installer URL and
+  # checksum pointed at this installer: its default inputs, its cache, its
+  # retries and its DD_TRACER_FOLDER, from the workspace where users run it.
+  github-action:
+    name: github action ${{ matrix.language }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        language:
+          - go
+          - python
+          - js
+          - java
+          - dotnet
+          - ruby
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: installer
+
+      - name: Check out the GitHub action
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-visibility-github-action
+          ref: 7ce545f228901e4ac4ef0b45d946120f1c4124e0
+          path: .github/test-visibility-github-action
+          persist-credentials: false
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Set up Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        if: matrix.language == 'js'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Set up Java
+        if: matrix.language == 'java'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up .NET
+        if: matrix.language == 'dotnet'
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Ruby
+        if: matrix.language == 'ruby'
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '3.3'
+
+      - name: Write the project in the workspace
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh ${{ matrix.language }} prepare
+
+      - name: Point the action at this installer
+        run: installer/tests/e2e/run.sh ${{ matrix.language }} patch-github-action .github/test-visibility-github-action
+
+      - name: Configure Datadog Test Optimization
+        uses: ./.github/test-visibility-github-action
+        with:
+          languages: ${{ matrix.language }}
+          api_key: dummy
+
+      - name: Run tests in the next step
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh ${{ matrix.language }} test
+
+      - name: Find ddtest's go from PowerShell
+        if: matrix.language == 'go'
+        shell: pwsh
+        run: |
+          $go = (Get-Command go).Source
+          Write-Output "go: $go"
+          if ($go -notlike '*go-shim*') { throw "go is $go, not ddtest's go command" }
+          go env GOVERSION
+
+  # The real GitLab script, at a pinned commit, sourced into the job's shell as
+  # its README shows, inside the images that GitLab jobs use, as root.
+  gitlab:
+    name: gitlab ${{ matrix.language }} (${{ matrix.image }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            image: golang:1.25
+          # BusyBox's sha256sum and wget, and no curl.
+          - language: go
+            image: golang:1.25-alpine
+          - language: python
+            image: python:3.12
+          - language: js
+            image: node:22
+          - language: java
+            image: maven:3.9-eclipse-temurin-21
+          - language: dotnet
+            image: mcr.microsoft.com/dotnet/sdk:8.0
+          - language: ruby
+            image: ruby:3.3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check out the GitLab script
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-optimization-gitlab-script
+          ref: b58a82b279bc00d642c389a3c1139a81766bee18
+          path: wrappers/gitlab
+          persist-credentials: false
+
+      - name: Install Bash and Python
+        shell: sh
+        run: sh tests/e2e/prepare-container.sh
+
+      - name: Run the GitLab script and the tests in one shell
+        shell: bash
+        run: E2E_GITLAB_SCRIPT="$GITHUB_WORKSPACE/wrappers/gitlab/script.sh" tests/e2e/run.sh ${{ matrix.language }} gitlab
+
+  # The real CircleCI orb's script, at a pinned commit, in a step of its own
+  # that writes BASH_ENV, which a later step sources.
+  circleci:
+    name: circleci ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - go
+          - python
+          - js
+          - java
+          - dotnet
+          - ruby
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check out the CircleCI orb
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-optimization-circleci-orb
+          ref: 3b771d563182e3a0d9509239091150d2cf430e6a
+          path: wrappers/circleci
+          persist-credentials: false
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Set up Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        if: matrix.language == 'js'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Set up Java
+        if: matrix.language == 'java'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up .NET
+        if: matrix.language == 'dotnet'
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Ruby
+        if: matrix.language == 'ruby'
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '3.3'
+
+      - name: Run the orb's script, then the tests with BASH_ENV
+        run: E2E_CIRCLECI_SCRIPT="$GITHUB_WORKSPACE/wrappers/circleci/src/scripts/autoinstrument.sh" tests/e2e/run.sh ${{ matrix.language }} circleci
