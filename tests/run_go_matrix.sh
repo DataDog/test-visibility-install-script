@@ -645,6 +645,63 @@ scenario_pinned_release_network_failure() {
   assert_go_not_instrumented
 }
 
+# Validate that curl's exit status 8, a reply it could not parse, for a pinned
+# release stays an error: only wget's 8 means the server answered with one.
+scenario_pinned_release_unparseable_reply() {
+  prepare_case "pinned_release_unparseable_reply"
+
+  run_install_script DD_SET_TRACER_VERSION_GO=v1.16.0 FAKE_FAIL_DOWNLOADS=1 FAKE_DOWNLOAD_EXIT=8
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/latest/"
+  assert_go_not_instrumented
+}
+
+# Replace curl with wget for one scenario: PATH holds only the fake commands
+# and the system commands that the script and the fakes run, so the script
+# cannot find a real curl. The fake wget serves the same release as the fake
+# curl and reports a server error with wget's exit status 8.
+use_wget_instead_of_curl() {
+  mkdir -p "$CURRENT_CASE_DIR/system-bin"
+  local tool
+  local tool_path
+  for tool in awk basename bash cat chmod cmp cp cut dirname env grep head mkdir mv rm sed sh sha256sum shasum sort touch tr; do
+    if tool_path="$(command -v "$tool")"; then
+      ln -s "$tool_path" "$CURRENT_CASE_DIR/system-bin/$tool"
+    fi
+  done
+  mv "$CURRENT_CASE_DIR/bin/curl" "$CURRENT_CASE_DIR/bin/fake-download"
+  cat > "$CURRENT_CASE_DIR/bin/wget" <<'EOF_WGET'
+#!/bin/bash
+# download_file runs wget -O <file> <url>, which the fake curl also reads.
+status=0
+"$(dirname "$0")/fake-download" "$@" || status=$?
+if [ "$status" -eq 22 ]; then
+  exit 8
+fi
+exit "$status"
+EOF_WGET
+  chmod +x "$CURRENT_CASE_DIR/bin/wget"
+}
+
+# Validate that with wget, whose exit status 8 means the server answered with
+# an error, a pinned release that ddtest never published installs the latest.
+scenario_wget_missing_release_installs_latest() {
+  prepare_case "wget_missing_release_installs_latest"
+  use_wget_instead_of_curl
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    DD_SET_TRACER_VERSION_GO=v1.99.0 \
+    FAKE_MISSING_RELEASE=v1.99.0
+
+  assert_exit_code 0
+  assert_file_contains "$LAST_STDERR" "Warning: DD_SET_TRACER_VERSION_GO=v1.99.0 is not a ddtest release from v1.14.0 on"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://github.com/DataDog/ddtest/releases/latest/download/ddtest-linux-amd64"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -652,6 +709,8 @@ main() {
   run_case "commit_version_installs_latest" scenario_commit_version_installs_latest
   run_case "missing_release_installs_latest" scenario_missing_release_installs_latest
   run_case "pinned_release_network_failure" scenario_pinned_release_network_failure
+  run_case "pinned_release_unparseable_reply" scenario_pinned_release_unparseable_reply
+  run_case "wget_missing_release_installs_latest" scenario_wget_missing_release_installs_latest
   run_case "runner_go_below_minimum" scenario_runner_go_below_minimum
   run_case "unsupported_platform" scenario_unsupported_platform
   run_case "checksum_mismatch" scenario_checksum_mismatch

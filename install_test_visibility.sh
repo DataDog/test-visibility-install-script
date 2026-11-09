@@ -600,6 +600,13 @@ install_go_tracer() {
   local filepath_checksums
   filepath_checksums="$ARTIFACTS_FOLDER/ddtest.SHA256SUMS"
 
+  # download_file runs curl when it can, else wget. Each reports that the
+  # server answered with an error, such as 404, with its own exit status:
+  # 22 from curl -f, 8 from wget. For curl, 8 is a reply it could not parse.
+  local server_error_status=22
+  if ! command -v curl >/dev/null 2>&1; then
+    server_error_status=8
+  fi
   local download_url
   local download_status
   while true; do
@@ -610,11 +617,10 @@ install_go_tracer() {
     fi
     download_status=0
     download_file "$download_url/SHA256SUMS" "$filepath_checksums" >&2 || download_status=$?
-    # The server answered with an error, 22 from curl -f or 8 from wget, for a
-    # pinned release: the release does not exist, as with a version number
-    # that ddtest never published, so the latest ddtest is installed instead.
-    # Network failures stay errors.
-    if [ "$ddtest_version" != "latest" ] && { [ $download_status -eq 22 ] || [ $download_status -eq 8 ]; }; then
+    # The server answered with an error for a pinned release: the release does
+    # not exist, as with a version number that ddtest never published, so the
+    # latest ddtest is installed instead. Network failures stay errors.
+    if [ "$ddtest_version" != "latest" ] && [ "$download_status" -eq "$server_error_status" ]; then
       >&2 echo "$unusable_version_warning"
       ddtest_version="latest"
       continue
