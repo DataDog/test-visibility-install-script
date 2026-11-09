@@ -18,6 +18,7 @@ import os
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from socketserver import TCPServer
 
 MAX_LIFETIME_SECONDS = 1800
 SETTINGS_PATH = "/api/v2/libraries/tests/services/setting"
@@ -90,8 +91,17 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+class Server(ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind also looks the host's name up with
+        # socket.getfqdn, which stalled for several seconds on macOS runners;
+        # nothing here uses the name.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def main():
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server = Server(("127.0.0.1", 0), Handler)
     # Renamed into place, so a reader never sees a partial port.
     with open(sys.argv[1] + ".tmp", "w", encoding="utf-8") as port_file:
         port_file.write(str(server.server_address[1]))
