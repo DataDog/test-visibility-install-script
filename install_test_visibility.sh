@@ -229,6 +229,16 @@ install_js_tracer() {
     >&2 echo "Error: Could not find the folder of global npm packages"
     return 1
   fi
+  # Users append the paths below to NODE_OPTIONS without quotes, as in
+  # "-r $DD_TRACE_PACKAGE", so a space splits them. On Windows the tracer
+  # folder can have one, as in C:\Program Files\Git\github\workspace, where
+  # the GitHub action puts it there: its short 8.3 form has none.
+  if [[ "$global_node_modules" == *" "* ]] && [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+    local short_global_node_modules
+    if short_global_node_modules=$(cygpath -d "$global_node_modules") && [[ "$short_global_node_modules" != *" "* ]]; then
+      global_node_modules="$short_global_node_modules"
+    fi
+  fi
 
   # Github Actions prohibit setting NODE_OPTIONS
   local dd_trace_ci_init_path="$global_node_modules/dd-trace/ci/init"
