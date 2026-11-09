@@ -92,6 +92,11 @@ jobs:
       - name: Install and run tests in one shell
         run: tests/e2e/run.sh ${{ matrix.language }} shell
 
+      # Users append the JS tracer's paths to NODE_OPTIONS without quotes.
+      - name: Install and run tests in one shell, from a tracer folder with spaces
+        if: matrix.language == 'js'
+        run: E2E_TRACER_FOLDER="$RUNNER_TEMP/tracer folder" tests/e2e/run.sh js shell
+
       # Then as the GitHub action consumes it: the output goes to GITHUB_ENV,
       # and the tests run in the next step. This runs even when the shell mode
       # failed, which still fails the job, so both consumers are checked.

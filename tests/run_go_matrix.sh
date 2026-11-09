@@ -168,47 +168,51 @@ DDTEST
 #!/bin/bash
 set -euo pipefail
 
-# download_file runs curl -fLo <file> <url>, and http_status runs
-# curl -s -o /dev/null -L -w '%{http_code}' <url>.
+# download_file runs curl -fLo <file> <url>, and download_with_status runs
+# curl -sSL -o <file> -w '%{http_code}' <url>, which prints the HTTP status
+# and, without -f, exits 0 for an HTTP error.
 url="${@: -1}"
-output="${@: -2:1}"
+output=""
 write_out=""
-while [ $# -gt 1 ]; do
-  if [ "$1" = "-w" ]; then
-    write_out="$2"
-  fi
-  shift
+arguments=("$@")
+for ((i = 0; i < ${#arguments[@]} - 1; i++)); do
+  case "${arguments[i]}" in
+    -o|-O|-fLo) output="${arguments[i + 1]}" ;;
+    -w) write_out="${arguments[i + 1]}" ;;
+  esac
 done
 printf '%s\n' "$url" >> "$FAKE_LOG_DIR/curl.log"
 
-missing_release=0
-if [ -n "${FAKE_MISSING_RELEASE:-}" ] && [[ "$url" == */download/"$FAKE_MISSING_RELEASE"/* ]]; then
-  missing_release=1
-fi
-
-# The HTTP status of the response: 000 when the network fails, 404 for a
-# missing release, FAKE_HTTP_STATUS (500 by default) for the server errors
-# that FAKE_FAIL_DOWNLOADS makes, else 200.
-if [ "$write_out" = "%{http_code}" ]; then
-  if [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ] && [ "${FAKE_DOWNLOAD_EXIT:-22}" != "22" ]; then
-    printf '000'
-    exit "$FAKE_DOWNLOAD_EXIT"
-  elif [ "$missing_release" = "1" ]; then
-    printf '404'
-  elif [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ]; then
-    printf '%s' "${FAKE_HTTP_STATUS:-500}"
-  else
-    printf '200'
-  fi
-  exit 0
-fi
-
-# curl -f exits 22 when the server answers with an error, such as 404 for a
-# release that does not exist, and with other codes when the network fails.
+# The HTTP status of each response: 404 for a missing release, else for the
+# errors that FAKE_FAIL_DOWNLOADS makes, the next of FAKE_HTTP_STATUSES (500
+# by default; the last one repeats), else 200. A network failure, with an
+# exit status other than 22, has none.
+http_code=200
 if [ "${FAKE_FAIL_DOWNLOADS:-0}" = "1" ]; then
-  exit "${FAKE_DOWNLOAD_EXIT:-22}"
+  if [ "${FAKE_DOWNLOAD_EXIT:-22}" != "22" ]; then
+    [ -z "$write_out" ] || printf '000'
+    exit "$FAKE_DOWNLOAD_EXIT"
+  fi
+  read -r -a statuses <<< "${FAKE_HTTP_STATUSES:-500}"
+  count=0
+  if [ -f "$FAKE_LOG_DIR/http-status.count" ]; then
+    count="$(cat "$FAKE_LOG_DIR/http-status.count")"
+  fi
+  printf '%s\n' "$((count + 1))" > "$FAKE_LOG_DIR/http-status.count"
+  if [ "$count" -ge "${#statuses[@]}" ]; then
+    count=$((${#statuses[@]} - 1))
+  fi
+  http_code="${statuses[$count]}"
+elif [ -n "${FAKE_MISSING_RELEASE:-}" ] && [[ "$url" == */download/"$FAKE_MISSING_RELEASE"/* ]]; then
+  http_code=404
 fi
-if [ "$missing_release" = "1" ]; then
+if [ "$http_code" != "200" ]; then
+  if [ -n "$write_out" ]; then
+    printf 'error page\n' > "$output"
+    printf '%s' "$http_code"
+    exit 0
+  fi
+  # curl -f exits 22 when the server answers with an error.
   exit 22
 fi
 
@@ -239,6 +243,7 @@ case "$url" in
     exit 1
     ;;
 esac
+[ -z "$write_out" ] || printf '200'
 EOF_CURL
   chmod +x "$CURRENT_CASE_DIR/bin/curl"
 
@@ -704,11 +709,11 @@ use_wget_instead_of_curl() {
   mv "$CURRENT_CASE_DIR/bin/curl" "$CURRENT_CASE_DIR/bin/fake-download"
   cat > "$CURRENT_CASE_DIR/bin/wget" <<'EOF_WGET'
 #!/bin/bash
-# http_status runs wget -S --spider <url>, which prints the response's status
-# line on stderr; ask the fake curl for that status.
-if [ "${2:-}" = "--spider" ]; then
-  code="$("$(dirname "$0")/fake-download" -w '%{http_code}' "${@: -1}" || true)"
-  if [ "$code" != "000" ]; then
+# download_with_status runs wget -S -O <file> <url>, which prints the
+# response's status line on stderr; the fake curl downloads and reports it.
+if [ "${1:-}" = "-S" ]; then
+  code="$("$(dirname "$0")/fake-download" -o "$3" -w '%{http_code}' "$4" || true)"
+  if [ -n "$code" ] && [ "$code" != "000" ]; then
     echo "  HTTP/1.1 $code Fake" >&2
   fi
   [ "$code" = "200" ] && exit 0 || exit 8
@@ -789,14 +794,17 @@ scenario_busybox_sha256sum_mismatch() {
 }
 
 # Validate that an HTTP error other than 404 for a pinned release, such as 429
-# from a rate limit, keeps the pin and fails instead of installing latest.
+# from a rate limit, keeps the pin and fails instead of installing latest,
+# even if another request for the same file would answer 404: the download's
+# own status decides.
 scenario_pinned_release_rate_limited() {
   prepare_case "pinned_release_rate_limited"
 
-  run_install_script DD_SET_TRACER_VERSION_GO=v1.16.0 FAKE_FAIL_DOWNLOADS=1 FAKE_HTTP_STATUS=429
+  run_install_script DD_SET_TRACER_VERSION_GO=v1.16.0 FAKE_FAIL_DOWNLOADS=1 FAKE_HTTP_STATUSES="429 404"
 
   assert_exit_code 1
   assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "The server answered with HTTP status 429."
   assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/latest/"
   assert_go_not_instrumented
 }
@@ -810,7 +818,7 @@ scenario_wget_pinned_release_server_error() {
     PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
     DD_SET_TRACER_VERSION_GO=v1.16.0 \
     FAKE_FAIL_DOWNLOADS=1 \
-    FAKE_HTTP_STATUS=503
+    FAKE_HTTP_STATUSES=503
 
   assert_exit_code 1
   assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."

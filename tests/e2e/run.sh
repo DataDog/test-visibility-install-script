@@ -38,7 +38,8 @@
 # language's toolchain: Go 1.25 or newer, Python with venv, Node.js with npm,
 # a JDK with Maven, the .NET SDK, or Ruby with Bundler; and Python for the
 # intake. E2E_DIR (default $RUNNER_TEMP/dd-e2e, else a new temporary
-# directory) holds the projects and the intake's files.
+# directory) holds the projects and the intake's files. E2E_TRACER_FOLDER, if
+# set, becomes the installer's DD_TRACER_FOLDER, such as a folder with spaces.
 
 set -euo pipefail
 
@@ -94,6 +95,9 @@ export DD_SERVICE="install-script-e2e-$language"
 export DD_CIVISIBILITY_GIT_UPLOAD_ENABLED=false
 export DD_INSTRUMENTATION_TELEMETRY_ENABLED=false
 export DD_REMOTE_CONFIGURATION_ENABLED=false
+if [ -n "${E2E_TRACER_FOLDER:-}" ]; then
+  export DD_TRACER_FOLDER="$E2E_TRACER_FOLDER"
+fi
 
 # An older go directive than ddtest's own toolchain requirement: the Go project
 # keeps its language version, and the installer must not change the file.
@@ -327,9 +331,10 @@ run_tests() {
   fi
 
   if [ "$language" = "js" ]; then
-    # The README has vitest users pass DD_TRACE_ESM_IMPORT to Node's --import,
-    # which needs a URL or a path that Node can resolve on every OS.
-    if ! node --import="$DD_TRACE_ESM_IMPORT" -e '' > "$test_log" 2>&1; then
+    # The README has vitest users append --import=$DD_TRACE_ESM_IMPORT to
+    # NODE_OPTIONS, which needs a URL or a path that Node can resolve on every
+    # OS, without spaces that NODE_OPTIONS would split.
+    if ! NODE_OPTIONS="${NODE_OPTIONS:-} --import=$DD_TRACE_ESM_IMPORT" node -e '' > "$test_log" 2>&1; then
       cat "$test_log" >&2
       fail "Node cannot --import DD_TRACE_ESM_IMPORT=$DD_TRACE_ESM_IMPORT"
     fi

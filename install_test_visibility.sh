@@ -232,8 +232,13 @@ install_js_tracer() {
   # Users append the paths below to NODE_OPTIONS without quotes, as in
   # "-r $DD_TRACE_PACKAGE", so a space splits them. On Windows the tracer
   # folder can have one, as in C:\Program Files\Git\github\workspace, where
-  # the GitHub action puts it there: its short 8.3 form has none.
-  if [[ "$global_node_modules" == *" "* ]] && [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+  # the GitHub action puts it there: its short 8.3 form, when the volume has
+  # 8.3 names, has none.
+  local is_windows=false
+  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+    is_windows=true
+  fi
+  if [[ "$global_node_modules" == *" "* ]] && [ "$is_windows" = true ]; then
     local short_global_node_modules
     if short_global_node_modules=$(cygpath -d "$global_node_modules") && [[ "$short_global_node_modules" != *" "* ]]; then
       global_node_modules="$short_global_node_modules"
@@ -243,6 +248,15 @@ install_js_tracer() {
   # Github Actions prohibit setting NODE_OPTIONS
   local dd_trace_ci_init_path="$global_node_modules/dd-trace/ci/init"
   local dd_trace_register_path="$global_node_modules/dd-trace/register.js"
+  # A path that still has a space goes in double quotes, which NODE_OPTIONS
+  # reads; inside them a backslash escapes the next character, so a Windows
+  # path uses forward slashes there.
+  if [[ "$dd_trace_ci_init_path" == *" "* ]]; then
+    if [ "$is_windows" = true ]; then
+      dd_trace_ci_init_path=$(cygpath -m "$dd_trace_ci_init_path")
+    fi
+    dd_trace_ci_init_path="\"$dd_trace_ci_init_path\""
+  fi
   if ! is_github_actions; then
     echo "NODE_OPTIONS=$NODE_OPTIONS -r $dd_trace_ci_init_path"
   else
@@ -250,7 +264,8 @@ install_js_tracer() {
   fi
   # Node's --import takes a URL or a specifier, and reads a Windows path such
   # as D:\a\register.js as a URL with the scheme d:, so Windows gets a file URL.
-  if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "cygwin" || "$OSTYPE" == "winnt" ]]; then
+  # So does a path with a space, which a file URL encodes as %20.
+  if [ "$is_windows" = true ] || [[ "$dd_trace_register_path" == *" "* ]]; then
     if ! dd_trace_register_path=$(node -e 'console.log(require("url").pathToFileURL(process.argv[1]).href)' "$dd_trace_register_path"); then
       >&2 echo "Error: Could not build the file URL of $dd_trace_register_path"
       return 1
@@ -276,17 +291,25 @@ is_node_version_compliant() {
   fi
 }
 
-# Print the HTTP status of the last response for a URL, after redirects, or
-# nothing (or 000 from curl) when no response arrived. download_file's exit
-# status cannot tell a missing file from other HTTP errors: curl -f exits 22,
-# and wget 8, for every one of them.
-http_status() {
+# Download URL $1 to file $2 and print the HTTP status of the last response,
+# after redirects, or nothing (000 from curl) when no response arrived.
+# download_file's exit status cannot tell a missing file from other HTTP
+# errors: curl -f exits 22, and wget 8, for every one of them.
+download_with_status() {
   if command -v curl >/dev/null 2>&1; then
-    curl -s -o /dev/null -L -w '%{http_code}' "$1" || true
+    curl -sSL -o "$2" -w '%{http_code}' "$1" || true
   elif command -v wget >/dev/null 2>&1; then
     # GNU wget prints each response's status line with -S, and BusyBox's
-    # prints the final error as "server returned error: HTTP/1.1 404 ...".
-    wget -S --spider "$1" 2>&1 | awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }'
+    # prints an error's as "server returned error: HTTP/1.1 404 ...". Its
+    # messages go through a file to stderr: tee /dev/stderr would reopen, and
+    # truncate, a stderr redirected to a file.
+    local wget_log="$2.wget-log"
+    wget -S -O "$2" "$1" 2> "$wget_log" || true
+    cat "$wget_log" >&2
+    awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }' "$wget_log"
+    rm -f "$wget_log"
+  else
+    >&2 echo "Error: Neither wget nor curl is installed."
   fi
 }
 
@@ -631,32 +654,33 @@ install_go_tracer() {
   filepath_checksums="$ARTIFACTS_FOLDER/ddtest.SHA256SUMS"
 
   local download_url
-  local download_status
+  local http_status
   while true; do
     if [ "$ddtest_version" = "latest" ]; then
       download_url="$DDTEST_RELEASES_URL/latest/download"
     else
       download_url="$DDTEST_RELEASES_URL/download/$ddtest_version"
     fi
-    download_status=0
-    download_file "$download_url/SHA256SUMS" "$filepath_checksums" >&2 || download_status=$?
+    http_status=$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums")
+    if [[ "$http_status" == 2?? ]]; then
+      break
+    fi
+    rm -f "$filepath_checksums"
     # A pinned release whose SHA256SUMS the server does not find does not
     # exist, as with a version number that ddtest never published, so the
     # latest ddtest is installed instead. Any other failure, such as a network
     # error or an HTTP 429 or 503, stays an error and keeps the pin.
-    if [ "$ddtest_version" != "latest" ] && [ "$download_status" -ne 0 ] &&
-       [ "$(http_status "$download_url/SHA256SUMS")" = "404" ]; then
+    if [ "$ddtest_version" != "latest" ] && [ "$http_status" = "404" ]; then
       >&2 echo "$unusable_version_warning"
       ddtest_version="latest"
       continue
     fi
-    break
-  done
-  if [ $download_status -ne 0 ]; then
-    rm -f "$filepath_checksums"
     >&2 echo "Error: Could not download $download_url/SHA256SUMS."
+    if [ -n "$http_status" ] && [ "$http_status" != "000" ]; then
+      >&2 echo "The server answered with HTTP status $http_status."
+    fi
     return 1
-  fi
+  done
   local checksum
   checksum=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$filepath_checksums")
   rm -f "$filepath_checksums"
