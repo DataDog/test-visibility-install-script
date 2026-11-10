@@ -1092,6 +1092,8 @@ https://ci:se/cr?et#x@mirror.example.com/r|<VAR>
 https://mirror.example.com/r?contact=ci@example.com&access_token=s3cret|<VAR>
 https://mirror.example.com/r#contact@s3cret|<VAR>
 https://mirror.example.com/r?access_token=s3cret|<VAR>
+ci:s3cret@https://mirror.example.com/ddtest/releases[|<VAR>
+ci:s3cret@mirror.example.com/ddtest/releases|<VAR>
 URLS
 }
 
@@ -1111,6 +1113,24 @@ scenario_mirror_malformed_credentials_hidden() {
   assert_file_not_contains "$LAST_STDERR" "s3cret"
   assert_file_not_contains "$LAST_STDERR" "pa/ss"
   assert_go_not_instrumented
+}
+
+# Validate that download_file, which Java uses, needs no temporary directory:
+# its downloader's messages wait in ARTIFACTS_FOLDER, which the download
+# needs writable anyway.
+scenario_download_messages_without_temporary_directory() {
+  prepare_case "download_messages_without_temporary_directory"
+  load_installer_function redact_urls
+  load_installer_function run_downloader
+  mkdir -p "$CURRENT_CASE_DIR/artifacts"
+  if ! (ARTIFACTS_FOLDER="$CURRENT_CASE_DIR/artifacts" TMPDIR="$CURRENT_CASE_DIR/missing" run_downloader sh -c 'echo "fetching http://user@host/x?token=t" >&2' 2> "$CURRENT_CASE_DIR/messages"); then
+    fail "run_downloader failed without a usable temporary directory"
+  fi
+  assert_file_contains "$CURRENT_CASE_DIR/messages" "fetching http://host/x"
+  assert_file_not_contains "$CURRENT_CASE_DIR/messages" "token=t"
+  if [ -n "$(ls -A "$CURRENT_CASE_DIR/artifacts")" ]; then
+    fail "run_downloader left files in ARTIFACTS_FOLDER: $(ls -A "$CURRENT_CASE_DIR/artifacts")"
+  fi
 }
 
 # Validate that the real curl's message about a URL that it cannot parse,
@@ -1251,6 +1271,7 @@ main() {
   run_case "busybox_wget_cannot_disable_redirects" scenario_busybox_wget_cannot_disable_redirects
   run_case "redact_urls" scenario_redact_urls
   run_case "url_for_messages" scenario_url_for_messages
+  run_case "download_messages_without_temporary_directory" scenario_download_messages_without_temporary_directory
   run_case "mirror_malformed_credentials_hidden" scenario_mirror_malformed_credentials_hidden
   run_case "mirror_query_credentials_hidden" scenario_mirror_query_credentials_hidden
   run_case "redirect_check_under_pipefail" scenario_redirect_check_under_pipefail
