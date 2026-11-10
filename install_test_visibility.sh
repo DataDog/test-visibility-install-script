@@ -154,23 +154,24 @@ url_for_messages() {
 }
 
 # Copy standard input to standard output with every URL in it shown as
-# url_for_messages shows one. GNU wget prints the URLs that it fetches, with
-# the user name, which can be a token, and the query.
+# url_for_messages shows one: downloaders print the URLs that they fetch or
+# cannot parse, with the user name, which can be a token, and the query,
+# also in a relative redirect such as "Location: /file?token=...".
 redact_urls() {
-  sed -e 's|\([A-Za-z][A-Za-z0-9+.-]*://\)[^/@[:space:]]*@|\1|g' \
-    -e 's|\([A-Za-z][A-Za-z0-9+.-]*://[^?#[:space:]]*\)[?#][^[:space:]]*|\1|g'
+  sed -e 's|//[^/@[:space:]]*@|//|g' \
+    -e 's|\(/[^?#[:space:]]*\)[?#][^[:space:]]*|\1|g'
 }
 
-# Run wget with its messages on stderr, without the credentials of the URLs
-# that they show.
-run_wget() {
-  local wget_log
-  wget_log=$(mktemp "${TMPDIR:-/tmp}/dd-wget.XXXXXX") || return 1
-  local wget_exit=0
-  wget "$@" 2> "$wget_log" || wget_exit=$?
-  redact_urls < "$wget_log" >&2
-  rm -f "$wget_log"
-  return "$wget_exit"
+# Run a downloader with its messages on stderr, without the credentials of
+# the URLs that they show. Its standard output stays its own.
+run_downloader() {
+  local downloader_log
+  downloader_log=$(mktemp "${TMPDIR:-/tmp}/dd-download.XXXXXX") || return 1
+  local downloader_exit=0
+  "$@" 2> "$downloader_log" || downloader_exit=$?
+  redact_urls < "$downloader_log" >&2
+  rm -f "$downloader_log"
+  return "$downloader_exit"
 }
 
 # Succeed when download_file and download_with_status can refuse redirects:
@@ -180,7 +181,15 @@ downloader_can_disable_redirects() {
   if command -v curl >/dev/null 2>&1; then
     return 0
   fi
-  wget --help 2>&1 | grep -q -- '--max-redirect'
+  # The whole help is read before it is searched: grep would stop at the
+  # match and close the pipe, also with its output on /dev/null, and wget,
+  # still writing, would fail the check under pipefail.
+  local wget_help
+  wget_help=$(wget --help 2>&1) || true
+  case "$wget_help" in
+    *--max-redirect*) return 0 ;;
+  esac
+  return 1
 }
 
 get_latest_java_tracer_version() {
@@ -216,22 +225,22 @@ download_file() {
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
       if [ -n "$disable_redirects" ]; then
-        curl -fLo "$filepath" --max-redirs 0 -H "$auth_header" "$url"
+        run_downloader curl -fLo "$filepath" --max-redirs 0 -H "$auth_header" "$url"
       else
-        curl -fLo "$filepath" -H "$auth_header" "$url"
+        run_downloader curl -fLo "$filepath" -H "$auth_header" "$url"
       fi
     else
-      curl -fLo "$filepath" "$url"
+      run_downloader curl -fLo "$filepath" "$url"
     fi
   elif command -v wget >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
       if [ -n "$disable_redirects" ]; then
-        run_wget --max-redirect=0 -O "$filepath" --header="$auth_header" "$url"
+        run_downloader wget --max-redirect=0 -O "$filepath" --header="$auth_header" "$url"
       else
-        run_wget -O "$filepath" --header="$auth_header" "$url"
+        run_downloader wget -O "$filepath" --header="$auth_header" "$url"
       fi
     else
-      run_wget -O "$filepath" "$url"
+      run_downloader wget -O "$filepath" "$url"
     fi
   else
     >&2 echo "Error: Neither wget nor curl is installed."
@@ -355,7 +364,7 @@ download_with_status() {
     # Without -f, curl exits 0 for an HTTP error, so a failure is a transfer
     # that did not complete.
     local curl_status
-    if curl_status=$(curl -sSL ${curl_options[@]+"${curl_options[@]}"} -o "$2" -w '%{http_code}' "$1"); then
+    if curl_status=$(run_downloader curl -sSL ${curl_options[@]+"${curl_options[@]}"} -o "$2" -w '%{http_code}' "$1"); then
       echo "$curl_status"
     else
       echo "000"
@@ -370,7 +379,9 @@ download_with_status() {
     local wget_log="$2.wget-log"
     local wget_exit=0
     wget -S ${wget_options[@]+"${wget_options[@]}"} -O "$2" "$1" 2> "$wget_log" || wget_exit=$?
-    redact_urls < "$wget_log" >&2
+    # Without the response headers that -S adds, indented by two spaces,
+    # such as Set-Cookie: only the status is needed from them.
+    grep -v '^  ' "$wget_log" | redact_urls >&2 || true
     local wget_status
     wget_status=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }' "$wget_log")
     rm -f "$wget_log"
@@ -676,7 +687,7 @@ install_go_tracer() {
     return 1
   fi
   local installed_go_version
-  installed_go_version=$(echo "$go_version_output" | grep -o -E 'go[0-9]+(\.[0-9]+)*((rc|beta)[0-9]*)?' | head -n 1 | sed 's/^go//')
+  installed_go_version=$(echo "$go_version_output" | grep -o -E 'go[0-9]+(\.[0-9]+)*((rc|beta)[0-9]*)?' | sed -n '1s/^go//p')
   if [ -z "$installed_go_version" ]; then
     >&2 echo "Error: Could not read the Go version from: $go_version_output"
     return 1
