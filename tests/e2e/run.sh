@@ -468,7 +468,10 @@ run_tests() {
 }
 
 run_installer() {
-  if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+  # BusyBox's wget ignores no_proxy, so it would send the mirror's requests to
+  # the proxy too: with it, the mirror is used without blocking other hosts,
+  # which the curl and GNU wget runs check.
+  if [ "${E2E_GO_MIRROR:-}" = "1" ] && { command -v curl >/dev/null 2>&1 || ! wget --help 2>&1 | grep -q BusyBox; }; then
     # Only the mirror, on this host, is reachable: github.com is not.
     https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
       http_proxy=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 \
@@ -499,9 +502,14 @@ prepare_ddtest_mirror() {
   rm -rf "$E2E_DIR/mirror"
   mkdir -p "$folder"
   local file
+  local url
   for file in SHA256SUMS "$asset"; do
-    curl -fsSL -o "$folder/$file" "https://github.com/DataDog/ddtest/releases/latest/download/$file" ||
-      fail "could not copy $file into the mirror"
+    url="https://github.com/DataDog/ddtest/releases/latest/download/$file"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL -o "$folder/$file" "$url" || fail "could not copy $file into the mirror"
+    else
+      wget -q -O "$folder/$file" "$url" || fail "could not copy $file into the mirror"
+    fi
   done
 }
 

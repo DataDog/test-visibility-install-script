@@ -440,6 +440,29 @@ jobs:
         env:
           E2E_GO_RUNNER: ${{ matrix.runner }}
 
+      # BusyBox's wget: ddtest from a mirror that requires a token in a
+      # header, and DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS, which BusyBox's
+      # wget cannot honor, refused before any download.
+      - name: Install from a ddtest mirror with BusyBox's wget
+        if: matrix.image == 'golang:1.25-alpine'
+        shell: bash
+        run: E2E_GO_MIRROR=1 tests/e2e/run.sh go shell
+
+      - name: Refuse to disable redirects with BusyBox's wget
+        if: matrix.image == 'golang:1.25-alpine'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/redirects" && cd "$RUNNER_TEMP/redirects"
+          status=0
+          DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
+            DD_SET_TRACER_REPOSITORY_URL_GO=http://127.0.0.1:9/mirror \
+            DD_SET_AUTH_HEADER_GO="Authorization: Bearer e2e" \
+            DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS=1 \
+            bash "$GITHUB_WORKSPACE/install_test_visibility.sh" > out 2> err || status=$?
+          cat err
+          [ "$status" -eq 1 ] || { echo "expected exit status 1, got $status" >&2; exit 1; }
+          grep -q 'DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS needs curl or a wget with --max-redirect' err
+
   # The real CircleCI orb's script, at a pinned commit, in a step of its own
   # that writes BASH_ENV, which a later step sources.
   circleci:

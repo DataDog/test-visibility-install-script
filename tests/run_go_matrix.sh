@@ -715,7 +715,7 @@ use_wget_instead_of_curl() {
   mkdir -p "$CURRENT_CASE_DIR/system-bin"
   local tool
   local tool_path
-  for tool in awk basename bash cat chmod cmp cp cut dirname env grep head mkdir mv rm sed sh sha256sum shasum sort touch tr; do
+  for tool in awk basename bash cat chmod cmp cp cut dirname env grep head mkdir mktemp mv rm sed sh sha256sum shasum sort touch tr; do
     if tool_path="$(command -v "$tool")"; then
       ln -s "$tool_path" "$CURRENT_CASE_DIR/system-bin/$tool"
     fi
@@ -723,6 +723,15 @@ use_wget_instead_of_curl() {
   mv "$CURRENT_CASE_DIR/bin/curl" "$CURRENT_CASE_DIR/bin/fake-download"
   cat > "$CURRENT_CASE_DIR/bin/wget" <<'EOF_WGET'
 #!/bin/bash
+# The installer reads wget --help to know whether wget has --max-redirect,
+# which BusyBox's wget, faked with FAKE_BUSYBOX_WGET, does not.
+if [ "${1:-}" = "--help" ]; then
+  echo "Usage: wget [options] url"
+  if [ "${FAKE_BUSYBOX_WGET:-0}" != "1" ]; then
+    echo "       --max-redirect=NUMBER  maximum redirections allowed per page"
+  fi
+  exit 0
+fi
 # download_with_status runs wget -S -O <file> <url>, which prints the
 # response's status line on stderr; the fake curl downloads and reports it.
 if [ "${1:-}" = "-S" ]; then
@@ -978,6 +987,43 @@ scenario_mirror_auth_header_without_redirects() {
   assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "ddtest-linux-amd64 | header=Authorization: Bearer t0k3n | max-redirects=0"
 }
 
+# Validate that DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS with BusyBox's wget,
+# which cannot refuse redirects, fails before any download with a clear
+# message.
+scenario_busybox_wget_cannot_disable_redirects() {
+  prepare_case "busybox_wget_cannot_disable_redirects"
+  use_wget_instead_of_curl
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    FAKE_BUSYBOX_WGET=1 \
+    DD_SET_TRACER_REPOSITORY_URL_GO=https://mirror.example.com/ddtest/releases \
+    DD_SET_AUTH_HEADER_GO="Authorization: Bearer t0k3n" \
+    DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS=1
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS needs curl or a wget with --max-redirect"
+  assert_file_missing "$CURRENT_CASE_DIR/logs/curl.log"
+  assert_go_not_instrumented
+}
+
+# Validate that the real wget's messages, which name the URLs that it fetches
+# with their user name and query, keep the mirror's credentials out of stderr.
+# It needs GNU wget on the host.
+scenario_real_wget_credentials_hidden() {
+  prepare_case "real_wget_credentials_hidden"
+  use_wget_instead_of_curl
+  ln -sf "$REAL_WGET" "$CURRENT_CASE_DIR/bin/wget"
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    DD_SET_TRACER_REPOSITORY_URL_GO="http://pat-t0k3n@127.0.0.1:9/ddtest/releases"
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "http://127.0.0.1:9/ddtest/releases/latest/download/SHA256SUMS"
+  assert_file_not_contains "$LAST_STDERR" "t0k3n"
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -997,6 +1043,13 @@ main() {
   run_case "wget_mirror_auth_header" scenario_wget_mirror_auth_header
   run_case "auth_header_without_mirror" scenario_auth_header_without_mirror
   run_case "mirror_auth_header_without_redirects" scenario_mirror_auth_header_without_redirects
+  run_case "busybox_wget_cannot_disable_redirects" scenario_busybox_wget_cannot_disable_redirects
+  REAL_WGET="$(command -v wget || true)"
+  if [ -n "$REAL_WGET" ] && "$REAL_WGET" --version 2>/dev/null | grep -q 'GNU Wget'; then
+    run_case "real_wget_credentials_hidden" scenario_real_wget_credentials_hidden
+  else
+    printf 'SKIP real_wget_credentials_hidden: no GNU wget on this host\n'
+  fi
   run_case "wget_truncated_checksums" scenario_wget_truncated_checksums
   run_case "busybox_sha256sum" scenario_busybox_sha256sum
   run_case "busybox_sha256sum_mismatch" scenario_busybox_sha256sum_mismatch
