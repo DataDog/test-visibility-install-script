@@ -690,6 +690,7 @@ scenario_pinned_release_network_failure() {
 
   assert_exit_code 1
   assert_file_contains "$LAST_STDERR" "Error: Could not download https://github.com/DataDog/ddtest/releases/download/v1.16.0/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "No complete response arrived: curl exited with status 7."
   assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "/latest/"
   assert_go_not_instrumented
 }
@@ -1051,6 +1052,8 @@ scenario_redact_urls() {
   actual="$(printf '%s\n' \
     '--2026-11-10--  http://demo-pat:*password*@mirror.example.com/r/SHA256SUMS?sig=s1' \
     'Location: /asset?access_token=s2 [following]' \
+    'Location: asset?access_token=s4 [following]' \
+    'Location: ?access_token=s5 [following]' \
     'Location: //tok3n@cdn.example.com/asset?sig=s3 [following]' \
     'http://pat-t0k3n@127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS' \
     'Saving to: /tmp/tracer folder/ddtest.SHA256SUMS' | redact_urls)"
@@ -1058,6 +1061,8 @@ scenario_redact_urls() {
   expected="$(printf '%s\n' \
     '--2026-11-10--  http://mirror.example.com/r/SHA256SUMS' \
     'Location: /asset [following]' \
+    'Location: asset [following]' \
+    'Location:  [following]' \
     'Location: //cdn.example.com/asset [following]' \
     'http://127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS' \
     'Saving to: /tmp/tracer folder/ddtest.SHA256SUMS')"
@@ -1095,6 +1100,78 @@ scenario_redirect_check_under_pipefail() {
   fi
 }
 
+# Start a local server that answers every request for a path without "next"
+# with a relative redirect to next?access_token=r3d1rect, and then 500, and
+# print its port. The caller stops it with kill.
+start_redirect_server() {
+  "$PYTHON" - "$CURRENT_CASE_DIR/redirect.port" <<'PYTHON' > "$CURRENT_CASE_DIR/redirect.log" 2>&1 &
+import os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import TCPServer
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        if "next" in self.path:
+            self.send_response(500)
+            self.send_header("Content-Length", "0")
+        else:
+            self.send_response(302)
+            self.send_header("Location", "next?access_token=r3d1rect")
+            self.send_header("Set-Cookie", "session=c00kie")
+            self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *args):
+        pass
+
+class Server(HTTPServer):
+    def server_bind(self):
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+server = Server(("127.0.0.1", 0), Handler)
+with open(sys.argv[1] + ".tmp", "w") as port:
+    port.write(str(server.server_address[1]))
+os.replace(sys.argv[1] + ".tmp", sys.argv[1])
+server.serve_forever()
+PYTHON
+  REDIRECT_SERVER_PID=$!
+  local _
+  for _ in $(seq 1 100); do
+    [ -s "$CURRENT_CASE_DIR/redirect.port" ] && break
+    sleep 0.1
+  done
+  [ -s "$CURRENT_CASE_DIR/redirect.port" ] || fail "the redirect server did not start"
+}
+
+# Validate that Go's downloads print none of what the real downloader says,
+# so nothing of a mirror's URL, its redirect or its headers reaches stderr:
+# here a token as the URL's user name, a relative redirect with a token in
+# its query, and a cookie.
+scenario_real_downloader_prints_nothing() {
+  local downloader="$1"
+  prepare_case "real_${downloader}_prints_nothing"
+  use_wget_instead_of_curl
+  rm -f "$CURRENT_CASE_DIR/bin/wget"
+  ln -sf "$(command -v "$downloader")" "$CURRENT_CASE_DIR/bin/$downloader"
+  start_redirect_server
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    DD_SET_TRACER_REPOSITORY_URL_GO="http://pat-t0k3n@127.0.0.1:$(cat "$CURRENT_CASE_DIR/redirect.port")/ddtest/releases"
+  kill "$REDIRECT_SERVER_PID" 2>/dev/null || true
+  wait "$REDIRECT_SERVER_PID" 2>/dev/null || true
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "/ddtest/releases/latest/download/SHA256SUMS."
+  # 500 after the redirect, or 302 from BusyBox's wget, which does not follow
+  # a relative one.
+  assert_file_contains "$LAST_STDERR" "The server answered with HTTP status"
+  assert_file_not_contains "$LAST_STDERR" "t0k3n"
+  assert_file_not_contains "$LAST_STDERR" "r3d1rect"
+  assert_file_not_contains "$LAST_STDERR" "c00kie"
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -1123,6 +1200,14 @@ main() {
   else
     printf 'SKIP real_curl_credentials_hidden: no curl on this host\n'
   fi
+  PYTHON="$(command -v python3 || true)"
+  for downloader in curl wget; do
+    if [ -n "$PYTHON" ] && command -v "$downloader" >/dev/null 2>&1; then
+      run_case "real_${downloader}_prints_nothing" scenario_real_downloader_prints_nothing "$downloader"
+    else
+      printf 'SKIP real_%s_prints_nothing: needs python3 and %s\n' "$downloader" "$downloader"
+    fi
+  done
   REAL_WGET="$(command -v wget || true)"
   if [ -n "$REAL_WGET" ] && "$REAL_WGET" --version 2>/dev/null | grep -q 'GNU Wget'; then
     run_case "real_wget_credentials_hidden" scenario_real_wget_credentials_hidden
