@@ -217,7 +217,7 @@ if [ "$http_code" != "200" ]; then
 fi
 
 case "$url" in
-  https://github.com/DataDog/ddtest/releases/*/SHA256SUMS)
+  */SHA256SUMS)
     checksum="$(cat "$FAKE_RELEASE_DIR/ddtest.sha256")"
     if [ "${FAKE_BAD_CHECKSUM:-0}" = "1" ]; then
       checksum="0000000000000000000000000000000000000000000000000000000000000000"
@@ -236,7 +236,7 @@ case "$url" in
       exit 18
     fi
     ;;
-  https://github.com/DataDog/ddtest/releases/*/ddtest-linux-amd64 | https://github.com/DataDog/ddtest/releases/*/ddtest-windows-amd64.exe)
+  */ddtest-linux-amd64 | */ddtest-windows-amd64.exe)
     if [ "${FAKE_FAIL_ASSET_DOWNLOAD:-0}" = "1" ]; then
       # curl keeps what arrived before a transfer error.
       printf 'partial' > "$output"
@@ -865,6 +865,50 @@ scenario_wget_truncated_checksums() {
   assert_go_not_instrumented
 }
 
+# Validate that DD_SET_TRACER_REPOSITORY_URL_GO, a mirror of ddtest's GitHub
+# releases with their layout, replaces github.com for every download, also
+# with a trailing slash.
+scenario_mirror_latest_release() {
+  prepare_case "mirror_latest_release"
+
+  run_install_script DD_SET_TRACER_REPOSITORY_URL_GO=https://mirror.example.com/ddtest/releases/
+
+  assert_exit_code 0
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://mirror.example.com/ddtest/releases/latest/download/SHA256SUMS"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://mirror.example.com/ddtest/releases/latest/download/ddtest-linux-amd64"
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "github.com"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that a pinned release comes from the mirror's download/<tag>.
+scenario_mirror_pinned_release() {
+  prepare_case "mirror_pinned_release"
+
+  run_install_script \
+    DD_SET_TRACER_REPOSITORY_URL_GO=https://mirror.example.com/ddtest/releases \
+    DD_SET_TRACER_VERSION_GO=v1.16.0
+
+  assert_exit_code 0
+  assert_file_contains "$CURRENT_CASE_DIR/logs/curl.log" "https://mirror.example.com/ddtest/releases/download/v1.16.0/ddtest-linux-amd64"
+  assert_file_not_contains "$CURRENT_CASE_DIR/logs/curl.log" "github.com"
+}
+
+# Validate that credentials in the mirror's URL stay out of the messages.
+scenario_mirror_credentials_hidden() {
+  prepare_case "mirror_credentials_hidden"
+
+  run_install_script \
+    DD_SET_TRACER_REPOSITORY_URL_GO=https://ci:s3cret@mirror.example.com/ddtest/releases \
+    FAKE_FAIL_DOWNLOADS=1 \
+    FAKE_HTTP_STATUSES=401
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download https://mirror.example.com/ddtest/releases/latest/download/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "The server answered with HTTP status 401."
+  assert_file_not_contains "$LAST_STDERR" "s3cret"
+  assert_go_not_instrumented
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -877,6 +921,9 @@ main() {
   run_case "pinned_release_rate_limited" scenario_pinned_release_rate_limited
   run_case "wget_pinned_release_server_error" scenario_wget_pinned_release_server_error
   run_case "truncated_checksums" scenario_truncated_checksums
+  run_case "mirror_latest_release" scenario_mirror_latest_release
+  run_case "mirror_pinned_release" scenario_mirror_pinned_release
+  run_case "mirror_credentials_hidden" scenario_mirror_credentials_hidden
   run_case "wget_truncated_checksums" scenario_wget_truncated_checksums
   run_case "busybox_sha256sum" scenario_busybox_sha256sum
   run_case "busybox_sha256sum_mismatch" scenario_busybox_sha256sum_mismatch

@@ -20,7 +20,7 @@ DEFAULT_JAVA_TRACER_REPOSITORY_URL="https://repo1.maven.org/maven2/com/datadoghq
 
 # Go tests report through ddtest instrument, which ddtest has carried since
 # v1.14.0 and which needs a Go 1.25 or newer toolchain.
-DDTEST_RELEASES_URL="https://github.com/DataDog/ddtest/releases"
+DEFAULT_DDTEST_RELEASES_URL="https://github.com/DataDog/ddtest/releases"
 DDTEST_MINIMUM_VERSION="v1.14.0"
 DDTEST_MINIMUM_GO_VERSION="1.25.0"
 
@@ -97,7 +97,7 @@ validate_java_auth_header_configuration() {
 
   if [ -n "${DD_SET_AUTH_HEADER_JAVA:-}" ]; then
     local repository_base_url
-    repository_base_url="$(normalize_java_tracer_repository_base_url "$DD_SET_TRACER_REPOSITORY_URL_JAVA")"
+    repository_base_url="$(normalize_repository_base_url "$DD_SET_TRACER_REPOSITORY_URL_JAVA")"
     if [ "$repository_base_url" = "$DEFAULT_JAVA_TRACER_REPOSITORY_URL" ]; then
       >&2 echo "Error: DD_SET_AUTH_HEADER_JAVA cannot be used with the default Maven Central repository. Set DD_SET_TRACER_REPOSITORY_URL_JAVA to a custom repository URL."
       return 1
@@ -128,10 +128,10 @@ verify_checksum() {
 
 get_java_tracer_repository_base_url() {
   local base_url="${DD_SET_TRACER_REPOSITORY_URL_JAVA:-$DEFAULT_JAVA_TRACER_REPOSITORY_URL}"
-  normalize_java_tracer_repository_base_url "$base_url"
+  normalize_repository_base_url "$base_url"
 }
 
-normalize_java_tracer_repository_base_url() {
+normalize_repository_base_url() {
   local base_url="$1"
   # Trim trailing slashes so callers can append "/<version>/..." uniformly
   # regardless of whether the override was provided with or without one.
@@ -139,6 +139,13 @@ normalize_java_tracer_repository_base_url() {
     base_url="${base_url%/}"
   done
   echo "$base_url"
+}
+
+# Print a URL for messages: without the user information, such as a token in
+# https://user:token@host, and without the query or fragment, which can carry
+# credentials too.
+url_for_messages() {
+  printf '%s\n' "$1" | sed -e 's|^\([A-Za-z][A-Za-z0-9+.-]*://\)[^/@]*@|\1|' -e 's|[?#].*||'
 }
 
 get_latest_java_tracer_version() {
@@ -668,14 +675,21 @@ install_go_tracer() {
   local filepath_checksums
   filepath_checksums="$ARTIFACTS_FOLDER/ddtest.SHA256SUMS"
 
+  # DD_SET_TRACER_REPOSITORY_URL_GO names a mirror of ddtest's GitHub
+  # releases, with their layout: latest/download/<file> and
+  # download/<tag>/<file>.
+  local releases_url
+  releases_url=$(normalize_repository_base_url "${DD_SET_TRACER_REPOSITORY_URL_GO:-$DEFAULT_DDTEST_RELEASES_URL}")
   local download_url
+  local shown_url
   local http_status
   while true; do
     if [ "$ddtest_version" = "latest" ]; then
-      download_url="$DDTEST_RELEASES_URL/latest/download"
+      download_url="$releases_url/latest/download"
     else
-      download_url="$DDTEST_RELEASES_URL/download/$ddtest_version"
+      download_url="$releases_url/download/$ddtest_version"
     fi
+    shown_url=$(url_for_messages "$download_url")
     http_status=$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums")
     if [[ "$http_status" == 2?? ]]; then
       break
@@ -690,7 +704,7 @@ install_go_tracer() {
       ddtest_version="latest"
       continue
     fi
-    >&2 echo "Error: Could not download $download_url/SHA256SUMS."
+    >&2 echo "Error: Could not download $shown_url/SHA256SUMS."
     if [ -n "$http_status" ] && [ "$http_status" != "000" ]; then
       >&2 echo "The server answered with HTTP status $http_status."
     fi
@@ -700,7 +714,7 @@ install_go_tracer() {
   checksum=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$filepath_checksums")
   rm -f "$filepath_checksums"
   if [ -z "$checksum" ]; then
-    >&2 echo "Error: The ddtest release at $download_url has no $asset."
+    >&2 echo "Error: The ddtest release at $shown_url has no $asset."
     return 1
   fi
 
@@ -711,7 +725,7 @@ install_go_tracer() {
   filepath_download="$filepath_ddtest.download.$$"
   if ! download_file "$download_url/$asset" "$filepath_download" >&2; then
     rm -f "$filepath_download"
-    >&2 echo "Error: Could not download $download_url/$asset."
+    >&2 echo "Error: Could not download $shown_url/$asset."
     return 1
   fi
   if ! verify_checksum "$checksum" "$filepath_download" >&2; then
