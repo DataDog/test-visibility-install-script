@@ -39,8 +39,10 @@ jobs:
           - dotnet
           - ruby
         include:
-          # ddtest's linux/arm64 executable.
+          # ddtest's linux/arm64 and darwin/amd64 executables.
           - os: ubuntu-24.04-arm
+            language: go
+          - os: macos-15-intel
             language: go
     defaults:
       run:
@@ -138,6 +140,11 @@ jobs:
         if: matrix.language == 'go'
         run: E2E_GO_RUNNER=toolchain tests/e2e/run.sh go shell
 
+      # ddtest from a mirror of its releases, with github.com unreachable.
+      - name: Install from a ddtest mirror and run tests in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_MIRROR=1 tests/e2e/run.sh go shell
+
       # A persistent runner, or a retry, runs the installer again over its own
       # output.
       - name: Install twice and run tests in one shell
@@ -149,6 +156,22 @@ jobs:
       - name: Install and run tests in one shell, from a tracer folder with spaces
         if: matrix.language == 'js' && matrix.os == 'windows-latest'
         run: E2E_TRACER_FOLDER="$RUNNER_TEMP/tracer folder" tests/e2e/run.sh js shell
+
+      # Without 8.3 names on the volume, the installer quotes the paths.
+      - name: Turn off 8.3 names on the temporary folder's volume
+        if: matrix.language == 'js' && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: fsutil 8dot3name set ((Get-Item $env:RUNNER_TEMP).PSDrive.Name + ':') 1
+
+      - name: Install and run tests in one shell, from a folder with spaces and no 8.3 names
+        if: matrix.language == 'js' && matrix.os == 'windows-latest'
+        run: |
+          E2E_TRACER_FOLDER="$RUNNER_TEMP/no short names" tests/e2e/run.sh js shell
+          if ! grep -q ' -r "' "$RUNNER_TEMP/dd-e2e/js-shell.env"; then
+            cat "$RUNNER_TEMP/dd-e2e/js-shell.env"
+            echo "The installer did not quote the path without an 8.3 name." >&2
+            exit 1
+          fi
 
       # Then as the GitHub action consumes it: the output goes to GITHUB_ENV,
       # and the tests run in the next step. This runs even when the shell mode
@@ -294,8 +317,11 @@ jobs:
           languages: ${{ matrix.language }}
           api_key: dummy
 
+      # The action's default go-tracer-version.
       - name: Run tests in the next step
         run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh ${{ matrix.language }} test
+        env:
+          E2E_EXPECT_DDTEST_VERSION: ${{ matrix.language == 'go' && 'v1.14.0' || '' }}
 
       - name: Find ddtest's go from PowerShell
         if: matrix.language == 'go'
@@ -305,6 +331,63 @@ jobs:
           Write-Output "go: $go"
           if ($go -notlike '*go-shim*') { throw "go is $go, not ddtest's go command" }
           go env GOVERSION
+
+  # The real GitHub action with go-tracer-version set: latest, a ddtest release,
+  # and an earlier Orchestrion pin, which installs the latest ddtest.
+  github-action-go-versions:
+    name: github action go (go-tracer-version ${{ matrix.go-tracer-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - go-tracer-version: latest
+            expected: latest
+          - go-tracer-version: v1.16.0
+            expected: v1.16.0
+          - go-tracer-version: v1.8.0
+            expected: latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: installer
+
+      - name: Check out the GitHub action
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-visibility-github-action
+          ref: 7ce545f228901e4ac4ef0b45d946120f1c4124e0
+          path: .github/test-visibility-github-action
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Write the project in the workspace
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh go prepare
+
+      - name: Point the action at this installer
+        run: installer/tests/e2e/run.sh go patch-github-action .github/test-visibility-github-action
+
+      - name: Configure Datadog Test Optimization
+        uses: ./.github/test-visibility-github-action
+        with:
+          languages: go
+          api_key: dummy
+          go-tracer-version: ${{ matrix.go-tracer-version }}
+
+      - name: Run tests in the next step
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh go test
+        env:
+          E2E_EXPECT_DDTEST_VERSION: ${{ matrix.expected }}
 
   # The real GitLab script, at a pinned commit, sourced into the job's shell as
   # its README shows, inside the images that GitLab jobs use, as root.

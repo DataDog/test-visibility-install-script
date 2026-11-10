@@ -46,6 +46,11 @@
 # set, becomes the installer's DD_TRACER_FOLDER, such as a folder with spaces.
 # E2E_INSTALL_TWICE=1 makes shell mode run the installer a second time with the
 # first run's output exported, as a persistent runner or a retry does.
+# E2E_EXPECT_DDTEST_VERSION, for Go, is the ddtest release that the installer
+# must have installed, or latest for the newest release.
+# E2E_GO_MIRROR=1 makes shell mode for Go install ddtest from a mirror of its
+# releases that the intake serves, through DD_SET_TRACER_REPOSITORY_URL_GO,
+# with every other host behind a proxy that refuses connections.
 # E2E_GO_RUNNER picks how Go runs its tests: go (go test, the default);
 # gotestsum as a binary that go install put on disk, as gotestsum-go-run with
 # go run, or as gotestsum-go-tool, a tool of the module; script, a shell script
@@ -322,7 +327,7 @@ start_intake() {
   [ -n "$python_bin" ] || fail "the intake needs Python"
   # Without the step's output streams: on Windows, a background process that
   # holds them keeps the GitHub Actions step running.
-  "$python_bin" "$repo_root/tests/e2e/intake.py" "$intake_dir/port" "$intake_dir/requests.log" "$installer" \
+  "$python_bin" "$repo_root/tests/e2e/intake.py" "$intake_dir/port" "$intake_dir/requests.log" "$installer" "$E2E_DIR/mirror" \
     > "$intake_dir/intake.out" 2>&1 &
   intake_pid=$!
   # shellcheck disable=SC2064
@@ -399,6 +404,16 @@ run_tests() {
       fail "a failing Go test must fail $go_runner"
     fi
     cmp -s "$go_module_dir/go.mod" "$E2E_DIR/expected-go.mod" || fail "go.mod changed"
+    if [ -n "${E2E_EXPECT_DDTEST_VERSION:-}" ]; then
+      local expected_version="$E2E_EXPECT_DDTEST_VERSION"
+      if [ "$expected_version" = "latest" ]; then
+        # GitHub redirects releases/latest to the newest release's tag.
+        expected_version="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/DataDog/ddtest/releases/latest)"
+        expected_version="${expected_version##*/}"
+      fi
+      [ "${DD_TRACER_VERSION_GO:-}" = "$expected_version" ] ||
+        fail "ddtest ${DD_TRACER_VERSION_GO:-?} was installed, not $expected_version"
+    fi
     if [ "$go_runner" = "toolchain" ]; then
       # The tests ran with the toolchain of the go.mod, not the runner's.
       [ "$(go env GOVERSION)" = "$go_toolchain" ] ||
@@ -418,11 +433,50 @@ run_tests() {
   if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
     runner="$runner, installed twice"
   fi
+  if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+    grep -q '^GET /mirror/latest/download/SHA256SUMS' "$intake_dir/requests.log" ||
+      fail "the installer did not download from the mirror"
+    runner="$runner, from a mirror"
+  fi
   echo "PASS ($language, $mode$runner): the test's event reached the intake"
 }
 
 run_installer() {
+  if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+    # Only the mirror, on this host, is reachable: github.com is not.
+    https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
+      http_proxy=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 \
+      no_proxy=127.0.0.1 NO_PROXY=127.0.0.1 \
+      DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="$language" bash "$installer"
+    return
+  fi
   DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="$language" bash "$installer"
+}
+
+# Copy the latest ddtest release's SHA256SUMS and this host's executable into
+# a mirror with the layout of ddtest's GitHub releases.
+prepare_ddtest_mirror() {
+  local asset
+  case "$(uname -s)" in
+    Linux) asset=ddtest-linux ;;
+    Darwin) asset=ddtest-darwin ;;
+    *) asset=ddtest-windows ;;
+  esac
+  case "$(uname -m)" in
+    aarch64|arm64) asset="$asset-arm64" ;;
+    *) asset="$asset-amd64" ;;
+  esac
+  if is_windows; then
+    asset="$asset.exe"
+  fi
+  local folder="$E2E_DIR/mirror/latest/download"
+  rm -rf "$E2E_DIR/mirror"
+  mkdir -p "$folder"
+  local file
+  for file in SHA256SUMS "$asset"; do
+    curl -fsSL -o "$folder/$file" "https://github.com/DataDog/ddtest/releases/latest/download/$file" ||
+      fail "could not copy $file into the mirror"
+  done
 }
 
 # Make an empty project directory, write the project in it and enter it.
@@ -441,6 +495,12 @@ case "$mode" in
     runs=1
     if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
       runs=2
+    fi
+    if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+      [ "$language" = "go" ] || fail "E2E_GO_MIRROR is for Go"
+      prepare_ddtest_mirror
+      start_intake
+      export DD_SET_TRACER_REPOSITORY_URL_GO="$intake_url/mirror"
     fi
     for run in $(seq 1 "$runs"); do
       # The second run starts with the first one's output exported: for Go,
