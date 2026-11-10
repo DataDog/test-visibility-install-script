@@ -49,8 +49,8 @@ install_java_tracer() {
   local filepath_checksum
   filepath_checksum="$ARTIFACTS_FOLDER/dd-java-agent.jar.sha256"
 
-  download_file "$repository_base_url/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar" "$filepath_tracer" "${DD_SET_AUTH_HEADER_JAVA:-}"
-  download_file "$repository_base_url/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar.sha256" "$filepath_checksum" "${DD_SET_AUTH_HEADER_JAVA:-}"
+  download_file "$repository_base_url/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar" "$filepath_tracer" "${DD_SET_AUTH_HEADER_JAVA:-}" "${DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS:-}"
+  download_file "$repository_base_url/$DD_SET_TRACER_VERSION_JAVA/dd-java-agent-$DD_SET_TRACER_VERSION_JAVA.jar.sha256" "$filepath_checksum" "${DD_SET_AUTH_HEADER_JAVA:-}" "${DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS:-}"
 
   if ! verify_checksum "$(cat $filepath_checksum)" "$filepath_tracer"; then
     return 1
@@ -156,8 +156,8 @@ get_latest_java_tracer_version() {
   local filepath_checksum
   filepath_checksum="$ARTIFACTS_FOLDER/maven-metadata.xml.sha256"
 
-  download_file "$repository_base_url/maven-metadata.xml" "$filepath_metadata" "${DD_SET_AUTH_HEADER_JAVA:-}"
-  download_file "$repository_base_url/maven-metadata.xml.sha256" "$filepath_checksum" "${DD_SET_AUTH_HEADER_JAVA:-}"
+  download_file "$repository_base_url/maven-metadata.xml" "$filepath_metadata" "${DD_SET_AUTH_HEADER_JAVA:-}" "${DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS:-}"
+  download_file "$repository_base_url/maven-metadata.xml.sha256" "$filepath_checksum" "${DD_SET_AUTH_HEADER_JAVA:-}" "${DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS:-}"
 
   if ! verify_checksum "$(cat $filepath_checksum)" "$filepath_metadata"; then
     return 1
@@ -171,11 +171,13 @@ get_latest_java_tracer_version() {
   echo "$java_tracer_version"
 }
 
+# Download URL $1 to file $2, sending header $3 if set, without following
+# redirects when $4 is set as well.
 download_file() {
   local url=$1
   local filepath=$2
   local auth_header="${3:-}"
-  local disable_redirects="${DD_SET_AUTH_HEADER_JAVA_DISABLE_REDIRECTS:-}"
+  local disable_redirects="${4:-}"
   if command -v curl >/dev/null 2>&1; then
     if [ -n "$auth_header" ]; then
       if [ -n "$disable_redirects" ]; then
@@ -301,13 +303,24 @@ is_node_version_compliant() {
 # after redirects, or 000 when no complete response arrived, as when the
 # network fails or the transfer stops early. download_file's exit status
 # cannot tell a missing file from other HTTP errors: curl -f exits 22, and
-# wget 8, for every one of them.
+# wget 8, for every one of them. Like download_file, it sends header $3 if
+# set, without following redirects when $4 is set as well.
 download_with_status() {
+  local -a curl_options=()
+  local -a wget_options=()
+  if [ -n "${3:-}" ]; then
+    curl_options=(-H "$3")
+    wget_options=("--header=$3")
+    if [ -n "${4:-}" ]; then
+      curl_options+=(--max-redirs 0)
+      wget_options+=(--max-redirect=0)
+    fi
+  fi
   if command -v curl >/dev/null 2>&1; then
     # Without -f, curl exits 0 for an HTTP error, so a failure is a transfer
     # that did not complete.
     local curl_status
-    if curl_status=$(curl -sSL -o "$2" -w '%{http_code}' "$1"); then
+    if curl_status=$(curl -sSL ${curl_options[@]+"${curl_options[@]}"} -o "$2" -w '%{http_code}' "$1"); then
       echo "$curl_status"
     else
       echo "000"
@@ -321,7 +334,7 @@ download_with_status() {
     # transfer that did not complete.
     local wget_log="$2.wget-log"
     local wget_exit=0
-    wget -S -O "$2" "$1" 2> "$wget_log" || wget_exit=$?
+    wget -S ${wget_options[@]+"${wget_options[@]}"} -O "$2" "$1" 2> "$wget_log" || wget_exit=$?
     cat "$wget_log" >&2
     local wget_status
     wget_status=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }' "$wget_log")
@@ -677,9 +690,16 @@ install_go_tracer() {
 
   # DD_SET_TRACER_REPOSITORY_URL_GO names a mirror of ddtest's GitHub
   # releases, with their layout: latest/download/<file> and
-  # download/<tag>/<file>.
+  # download/<tag>/<file>. DD_SET_AUTH_HEADER_GO authenticates against it,
+  # and never goes to github.com.
   local releases_url
   releases_url=$(normalize_repository_base_url "${DD_SET_TRACER_REPOSITORY_URL_GO:-$DEFAULT_DDTEST_RELEASES_URL}")
+  local auth_header="${DD_SET_AUTH_HEADER_GO:-}"
+  if [ -n "$auth_header" ] && [ "$releases_url" = "$DEFAULT_DDTEST_RELEASES_URL" ]; then
+    >&2 echo "Error: DD_SET_AUTH_HEADER_GO requires DD_SET_TRACER_REPOSITORY_URL_GO to be set to a mirror of ddtest's releases."
+    return 1
+  fi
+  local disable_redirects="${DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS:-}"
   local download_url
   local shown_url
   local http_status
@@ -690,7 +710,7 @@ install_go_tracer() {
       download_url="$releases_url/download/$ddtest_version"
     fi
     shown_url=$(url_for_messages "$download_url")
-    http_status=$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums")
+    http_status=$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums" "$auth_header" "$disable_redirects")
     if [[ "$http_status" == 2?? ]]; then
       break
     fi
@@ -723,7 +743,7 @@ install_go_tracer() {
   # it: a failed download or a checksum mismatch keeps the installed one.
   local filepath_download
   filepath_download="$filepath_ddtest.download.$$"
-  if ! download_file "$download_url/$asset" "$filepath_download" >&2; then
+  if ! download_file "$download_url/$asset" "$filepath_download" "$auth_header" "$disable_redirects" >&2; then
     rm -f "$filepath_download"
     >&2 echo "Error: Could not download $shown_url/$asset."
     return 1

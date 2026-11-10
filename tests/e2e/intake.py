@@ -10,7 +10,8 @@ msgpack and JSON both keep strings as UTF-8 bytes. With an installer, it also
 serves that file at /install_test_visibility.sh, for the wrappers that
 download the installer from a URL. With a mirror directory, it serves its
 files under /mirror/, and answers 404 for the others, as a mirror of ddtest's
-releases would. The settings request gets every feature switched off, so the
+releases would; with INTAKE_MIRROR_AUTHORIZATION set, it answers 401 to a
+mirror request whose Authorization header is not that value. The settings request gets every feature switched off, so the
 libraries only report test events; every other request is accepted. run.sh
 stops it; it also stops by itself after MAX_LIFETIME_SECONDS, so a kill that
 fails cannot keep a CI job running.
@@ -100,6 +101,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._record()
         if self.path.startswith(MIRROR_PREFIX) and len(sys.argv) > 4:
+            authorization = os.environ.get("INTAKE_MIRROR_AUTHORIZATION")
+            if authorization and self.headers.get("Authorization") != authorization:
+                self._reply(401, {})
+                return
             root = os.path.realpath(sys.argv[4])
             target = os.path.realpath(os.path.join(root, self.path[len(MIRROR_PREFIX):]))
             if target.startswith(root + os.sep) and os.path.isfile(target):

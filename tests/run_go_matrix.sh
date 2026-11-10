@@ -174,14 +174,22 @@ set -euo pipefail
 url="${@: -1}"
 output=""
 write_out=""
+header=""
+max_redirects=""
 arguments=("$@")
 for ((i = 0; i < ${#arguments[@]} - 1; i++)); do
   case "${arguments[i]}" in
     -o|-O|-fLo) output="${arguments[i + 1]}" ;;
     -w) write_out="${arguments[i + 1]}" ;;
+    -H) header="${arguments[i + 1]}" ;;
+    --header=*) header="${arguments[i]#--header=}" ;;
+    --max-redirs) max_redirects="${arguments[i + 1]}" ;;
+    --max-redirect=*) max_redirects="${arguments[i]#--max-redirect=}" ;;
   esac
 done
 printf '%s\n' "$url" >> "$FAKE_LOG_DIR/curl.log"
+# What each request sent: its header and redirect limit, if any.
+printf '%s | header=%s | max-redirects=%s\n' "${url##*/}" "$header" "$max_redirects" >> "$FAKE_LOG_DIR/requests.log"
 
 # The HTTP status of each response: 404 for a missing release, else for the
 # errors that FAKE_FAIL_DOWNLOADS makes, the next of FAKE_HTTP_STATUSES (500
@@ -719,7 +727,7 @@ use_wget_instead_of_curl() {
 # response's status line on stderr; the fake curl downloads and reports it.
 if [ "${1:-}" = "-S" ]; then
   transfer=0
-  code="$("$(dirname "$0")/fake-download" -o "$3" -w '%{http_code}' "$4")" || transfer=$?
+  code="$("$(dirname "$0")/fake-download" -w '%{http_code}' "${@:2}")" || transfer=$?
   if [ -n "$code" ] && [ "$code" != "000" ]; then
     echo "  HTTP/1.1 $code Fake" >&2
   fi
@@ -909,6 +917,67 @@ scenario_mirror_credentials_hidden() {
   assert_go_not_instrumented
 }
 
+# Validate that DD_SET_AUTH_HEADER_GO goes with both downloads from the mirror,
+# and stays out of the output.
+scenario_mirror_auth_header() {
+  prepare_case "mirror_auth_header"
+
+  run_install_script \
+    DD_SET_TRACER_REPOSITORY_URL_GO=https://mirror.example.com/ddtest/releases \
+    DD_SET_AUTH_HEADER_GO="Authorization: Bearer t0k3n"
+
+  assert_exit_code 0
+  assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "SHA256SUMS | header=Authorization: Bearer t0k3n | max-redirects="
+  assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "ddtest-linux-amd64 | header=Authorization: Bearer t0k3n | max-redirects="
+  assert_file_not_contains "$LAST_STDOUT" "t0k3n"
+  assert_file_not_contains "$LAST_STDERR" "t0k3n"
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate the same with wget.
+scenario_wget_mirror_auth_header() {
+  prepare_case "wget_mirror_auth_header"
+  use_wget_instead_of_curl
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    DD_SET_TRACER_REPOSITORY_URL_GO=https://mirror.example.com/ddtest/releases \
+    DD_SET_AUTH_HEADER_GO="Authorization: Bearer t0k3n"
+
+  assert_exit_code 0
+  assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "SHA256SUMS | header=Authorization: Bearer t0k3n | max-redirects="
+  assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "ddtest-linux-amd64 | header=Authorization: Bearer t0k3n | max-redirects="
+  assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+}
+
+# Validate that DD_SET_AUTH_HEADER_GO without a mirror fails before any
+# download, so the header never goes to github.com.
+scenario_auth_header_without_mirror() {
+  prepare_case "auth_header_without_mirror"
+
+  run_install_script DD_SET_AUTH_HEADER_GO="Authorization: Bearer t0k3n"
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: DD_SET_AUTH_HEADER_GO requires DD_SET_TRACER_REPOSITORY_URL_GO to be set to a mirror of ddtest's releases."
+  assert_file_missing "$CURRENT_CASE_DIR/logs/curl.log"
+  assert_go_not_instrumented
+}
+
+# Validate that DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS stops both downloads
+# from following redirects with the header.
+scenario_mirror_auth_header_without_redirects() {
+  prepare_case "mirror_auth_header_without_redirects"
+
+  run_install_script \
+    DD_SET_TRACER_REPOSITORY_URL_GO=https://mirror.example.com/ddtest/releases \
+    DD_SET_AUTH_HEADER_GO="Authorization: Bearer t0k3n" \
+    DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS=1
+
+  assert_exit_code 0
+  assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "SHA256SUMS | header=Authorization: Bearer t0k3n | max-redirects=0"
+  assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "ddtest-linux-amd64 | header=Authorization: Bearer t0k3n | max-redirects=0"
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -924,6 +993,10 @@ main() {
   run_case "mirror_latest_release" scenario_mirror_latest_release
   run_case "mirror_pinned_release" scenario_mirror_pinned_release
   run_case "mirror_credentials_hidden" scenario_mirror_credentials_hidden
+  run_case "mirror_auth_header" scenario_mirror_auth_header
+  run_case "wget_mirror_auth_header" scenario_wget_mirror_auth_header
+  run_case "auth_header_without_mirror" scenario_auth_header_without_mirror
+  run_case "mirror_auth_header_without_redirects" scenario_mirror_auth_header_without_redirects
   run_case "wget_truncated_checksums" scenario_wget_truncated_checksums
   run_case "busybox_sha256sum" scenario_busybox_sha256sum
   run_case "busybox_sha256sum_mismatch" scenario_busybox_sha256sum_mismatch
