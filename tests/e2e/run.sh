@@ -9,6 +9,7 @@
 #   tests/e2e/run.sh <language> prepare                     (E2E_PROJECT)
 #   tests/e2e/run.sh <language> patch-github-action <dir>
 #   tests/e2e/run.sh <language> test                        (E2E_PROJECT)
+#   tests/e2e/run.sh go skipped                             (Go older than 1.25)
 #
 # Each run builds a small project with one passing test for the language, runs
 # the installer from the project, runs the project's tests with what the
@@ -28,6 +29,9 @@
 #   (E2E_CIRCLECI_SCRIPT, its src/scripts/autoinstrument.sh), as those CI
 #   systems do, with only the installer's URL and checksum changed to this
 #   installer, which the intake serves.
+# - skipped runs the installer with a Go too old for ddtest instrument, which it
+#   skips with a warning and exit status 0, and then the tests, which still
+#   pass, without Test Optimization.
 # - prepare, patch-github-action and test run the real GitHub action across a
 #   job's steps: prepare writes the project in E2E_PROJECT, the workspace that
 #   the action installs from; patch-github-action points a checkout of the
@@ -40,9 +44,15 @@
 # intake. E2E_DIR (default $RUNNER_TEMP/dd-e2e, else a new temporary
 # directory) holds the projects and the intake's files. E2E_TRACER_FOLDER, if
 # set, becomes the installer's DD_TRACER_FOLDER, such as a folder with spaces.
-# E2E_GO_RUNNER picks how Go runs its tests: go (go test, the default), or
+# E2E_INSTALL_TWICE=1 makes shell mode run the installer a second time with the
+# first run's output exported, as a persistent runner or a retry does.
+# E2E_GO_RUNNER picks how Go runs its tests: go (go test, the default);
 # gotestsum as a binary that go install put on disk, as gotestsum-go-run with
-# go run, or as gotestsum-go-tool, a tool of the module.
+# go run, or as gotestsum-go-tool, a tool of the module; script, a shell script
+# that runs go test; make, a make target that does; subdir, with the module in
+# services/payments, where the tests run after cd; go-C, the same module run
+# with go -C; or toolchain, a go.mod whose toolchain line, newer than the
+# runner's Go, makes go switch to that toolchain (GOTOOLCHAIN=auto).
 
 set -euo pipefail
 
@@ -107,6 +117,13 @@ fi
 go_mod="$(printf 'module example.com/e2e\n\ngo 1.22')"
 go_runner="${E2E_GO_RUNNER:-go}"
 gotestsum_module="gotest.tools/gotestsum@v1.13.0"
+# Newer than the Go 1.25 that the workflow sets up.
+go_toolchain="go1.26.0"
+go_module_dir="."
+case "$go_runner" in
+  subdir|go-C) go_module_dir="services/payments" ;;
+  toolchain) export GOTOOLCHAIN=auto ;;
+esac
 
 activate_python_venv() {
   if is_windows; then
@@ -123,8 +140,12 @@ activate_python_venv() {
 prepare_project() {
   case "$language" in
     go)
-      printf '%s\n' "$go_mod" > go.mod
-      cat > e2e_test.go <<'GO'
+      mkdir -p "$go_module_dir"
+      printf '%s\n' "$go_mod" > "$go_module_dir/go.mod"
+      if [ "$go_runner" = "toolchain" ]; then
+        printf 'toolchain %s\n' "$go_toolchain" >> go.mod
+      fi
+      cat > "$go_module_dir/e2e_test.go" <<'GO'
 package e2e
 
 import (
@@ -141,13 +162,15 @@ GO
       # gotestsum is installed before the installer runs, with the
       # toolchain's go, as a project's CI would.
       case "$go_runner" in
-        go|gotestsum-go-run) ;;
+        go|gotestsum-go-run|subdir|go-C|toolchain) ;;
         gotestsum) GOBIN="$E2E_DIR/bin" go install "$gotestsum_module" >&2 ;;
         gotestsum-go-tool) go get -tool "$gotestsum_module" >&2 ;;
+        script) printf '#!/usr/bin/env bash\nset -e\ngo test -count=1 ./...\n' > run-tests.sh ;;
+        make) printf 'test:\n\tgo test -count=1 ./...\n' > Makefile ;;
         *) fail "unknown E2E_GO_RUNNER: $go_runner" ;;
       esac
       # What the project's go.mod holds before the installer runs.
-      cp go.mod "$E2E_DIR/expected-go.mod"
+      cp "$go_module_dir/go.mod" "$E2E_DIR/expected-go.mod"
       ;;
     python)
       python -m venv app
@@ -258,6 +281,11 @@ project_tests() {
         gotestsum) "$E2E_DIR/bin/gotestsum" --format testname -- -count=1 ./... ;;
         gotestsum-go-run) go run "$gotestsum_module" --format testname -- -count=1 ./... ;;
         gotestsum-go-tool) go tool gotestsum --format testname -- -count=1 ./... ;;
+        script) bash ./run-tests.sh ;;
+        make) make test ;;
+        subdir) (cd "$go_module_dir" && go test -count=1 ./...) ;;
+        go-C) go -C "$go_module_dir" test -count=1 ./... ;;
+        toolchain) go test -count=1 ./... ;;
       esac
       ;;
     python) python -m pytest -q ;;
@@ -370,7 +398,12 @@ run_tests() {
       cat "$test_log" >&2
       fail "a failing Go test must fail $go_runner"
     fi
-    cmp -s go.mod "$E2E_DIR/expected-go.mod" || fail "go.mod changed"
+    cmp -s "$go_module_dir/go.mod" "$E2E_DIR/expected-go.mod" || fail "go.mod changed"
+    if [ "$go_runner" = "toolchain" ]; then
+      # The tests ran with the toolchain of the go.mod, not the runner's.
+      [ "$(go env GOVERSION)" = "$go_toolchain" ] ||
+        fail "go did not switch to $go_toolchain: $(go env GOVERSION)"
+    fi
     # go test through ddtest leaves no file of its own in the project.
     [ "$(project_files)" = "$files_before" ] ||
       fail "go test changed the project's files: $(project_files | tr '\n' ' ')"
@@ -381,6 +414,9 @@ run_tests() {
   local runner=""
   if [ "$language" = "go" ] && [ "$go_runner" != "go" ]; then
     runner=", $go_runner"
+  fi
+  if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
+    runner="$runner, installed twice"
   fi
   echo "PASS ($language, $mode$runner): the test's event reached the intake"
 }
@@ -402,13 +438,36 @@ case "$mode" in
     new_project
     # Outside GitHub Actions, even when this test runs there.
     unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
-    run_installer > "$E2E_DIR/$language-shell.env"
-    while IFS='=' read -r name value; do
-      if [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-        export "$name=$value"
-      fi
-    done < "$E2E_DIR/$language-shell.env"
+    runs=1
+    if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
+      runs=2
+    fi
+    for run in $(seq 1 "$runs"); do
+      # The second run starts with the first one's output exported: for Go,
+      # with ddtest's go first on PATH and the installed ddtest to replace.
+      run_installer > "$E2E_DIR/$language-shell.env" || fail "installer run $run failed"
+      while IFS='=' read -r name value; do
+        if [[ $name =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+          export "$name=$value"
+        fi
+      done < "$E2E_DIR/$language-shell.env"
+    done
     run_tests
+    ;;
+  skipped)
+    [ "$language" = "go" ] || fail "skipped runs Go with a toolchain older than 1.25"
+    new_project
+    unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
+    status=0
+    run_installer > "$E2E_DIR/go-skipped.env" 2> "$E2E_DIR/go-skipped.err" || status=$?
+    cat "$E2E_DIR/go-skipped.err" >&2
+    [ "$status" -eq 0 ] || fail "the installer must let the job continue, exit status $status"
+    grep -q '^Warning: The installed Go version' "$E2E_DIR/go-skipped.err" || fail "no warning about the Go version"
+    grep -q '^Skipping Go instrumentation.' "$E2E_DIR/go-skipped.err" || fail "Go was not skipped"
+    ! grep -qE '^(PATH|DD_TRACER_VERSION_GO)=' "$E2E_DIR/go-skipped.env" || fail "the installer printed Go settings"
+    [ ! -e .datadog/ddtest ] || fail "the installer downloaded ddtest"
+    go test -count=1 ./... >&2 || fail "the tests must still pass with plain go test"
+    echo "PASS (go, skipped): $(go env GOVERSION) skipped with a warning; the tests ran without Test Optimization"
     ;;
   github-install)
     [ -n "${GITHUB_ENV:-}" ] || fail "github-install runs in a GitHub Actions step"

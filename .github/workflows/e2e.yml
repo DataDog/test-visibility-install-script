@@ -14,6 +14,10 @@ on:
       - install_test_visibility.sh
       - tests/e2e/**
       - .github/workflows/e2e.yml
+  # Every night too: the installer installs the latest ddtest and tracers by
+  # default, and a new release can break it without a change here.
+  schedule:
+    - cron: '17 5 * * *'
   workflow_dispatch:
 
 jobs:
@@ -34,6 +38,10 @@ jobs:
           - java
           - dotnet
           - ruby
+        include:
+          # ddtest's linux/arm64 executable.
+          - os: ubuntu-24.04-arm
+            language: go
     defaults:
       run:
         shell: bash
@@ -107,6 +115,34 @@ jobs:
         if: matrix.language == 'go'
         run: E2E_GO_RUNNER=gotestsum-go-tool tests/e2e/run.sh go shell
 
+      # A script or a make target that runs go test, a module in a subfolder,
+      # with cd and with go -C, and a toolchain line that makes go switch to a
+      # newer Go than the runner's.
+      - name: go test from a script in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=script tests/e2e/run.sh go shell
+
+      - name: go test from make in one shell
+        if: matrix.language == 'go' && matrix.os != 'windows-latest'
+        run: E2E_GO_RUNNER=make tests/e2e/run.sh go shell
+
+      - name: go test in a module subfolder in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=subdir tests/e2e/run.sh go shell
+
+      - name: go -C test in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=go-C tests/e2e/run.sh go shell
+
+      - name: go test with a newer toolchain line in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=toolchain tests/e2e/run.sh go shell
+
+      # A persistent runner, or a retry, runs the installer again over its own
+      # output.
+      - name: Install twice and run tests in one shell
+        run: E2E_INSTALL_TWICE=1 tests/e2e/run.sh ${{ matrix.language }} shell
+
       # Users append the JS tracer's paths to NODE_OPTIONS without quotes, so
       # on Windows the installer prints them in 8.3 form or quoted; Linux and
       # macOS do not support a folder with spaces for JS.
@@ -140,6 +176,35 @@ jobs:
           Write-Output "go: $go"
           if ($go -notlike '*go-shim*') { throw "go is $go, not ddtest's go command" }
           go env GOVERSION
+
+  # A runner whose Go is older than ddtest instrument needs: the installer skips
+  # Go with a warning and lets the job continue.
+  go-too-old:
+    name: go too old (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Install with Go 1.24 and run the tests
+        run: tests/e2e/run.sh go skipped
 
   # The real GitHub action, at a pinned commit, with only its installer URL and
   # checksum pointed at this installer: its default inputs, its cache, its
