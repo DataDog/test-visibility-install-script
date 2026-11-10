@@ -40,6 +40,9 @@
 # intake. E2E_DIR (default $RUNNER_TEMP/dd-e2e, else a new temporary
 # directory) holds the projects and the intake's files. E2E_TRACER_FOLDER, if
 # set, becomes the installer's DD_TRACER_FOLDER, such as a folder with spaces.
+# E2E_GO_RUNNER picks how Go runs its tests: go (go test, the default), or
+# gotestsum as a binary that go install put on disk, as gotestsum-go-run with
+# go run, or as gotestsum-go-tool, a tool of the module.
 
 set -euo pipefail
 
@@ -102,6 +105,8 @@ fi
 # An older go directive than ddtest's own toolchain requirement: the Go project
 # keeps its language version, and the installer must not change the file.
 go_mod="$(printf 'module example.com/e2e\n\ngo 1.22')"
+go_runner="${E2E_GO_RUNNER:-go}"
+gotestsum_module="gotest.tools/gotestsum@v1.13.0"
 
 activate_python_venv() {
   if is_windows; then
@@ -133,6 +138,16 @@ func TestDdE2eMarker(t *testing.T) {
 	}
 }
 GO
+      # gotestsum is installed before the installer runs, with the
+      # toolchain's go, as a project's CI would.
+      case "$go_runner" in
+        go|gotestsum-go-run) ;;
+        gotestsum) GOBIN="$E2E_DIR/bin" go install "$gotestsum_module" >&2 ;;
+        gotestsum-go-tool) go get -tool "$gotestsum_module" >&2 ;;
+        *) fail "unknown E2E_GO_RUNNER: $go_runner" ;;
+      esac
+      # What the project's go.mod holds before the installer runs.
+      cp go.mod "$E2E_DIR/expected-go.mod"
       ;;
     python)
       python -m venv app
@@ -236,7 +251,15 @@ RUBY
 # environment that it configured.
 project_tests() {
   case "$language" in
-    go) go test -count=1 ./... ;;
+    go)
+      # gotestsum runs go test itself, with the go that it finds on PATH.
+      case "$go_runner" in
+        go) go test -count=1 ./... ;;
+        gotestsum) "$E2E_DIR/bin/gotestsum" --format testname -- -count=1 ./... ;;
+        gotestsum-go-run) go run "$gotestsum_module" --format testname -- -count=1 ./... ;;
+        gotestsum-go-tool) go tool gotestsum --format testname -- -count=1 ./... ;;
+      esac
+      ;;
     python) python -m pytest -q ;;
     js)
       # In GitHub Actions the installer prints DD_TRACE_PACKAGE instead of
@@ -341,12 +364,13 @@ run_tests() {
   fi
 
   if [ "$language" = "go" ]; then
-    # go test keeps its own exit status through ddtest's go.
-    if E2E_FAIL=1 go test -count=1 ./... > "$test_log" 2>&1; then
+    # go test, and gotestsum around it, keep their exit status through
+    # ddtest's go.
+    if E2E_FAIL=1 project_tests > "$test_log" 2>&1; then
       cat "$test_log" >&2
-      fail "a failing Go test must fail go test"
+      fail "a failing Go test must fail $go_runner"
     fi
-    [ "$(cat go.mod)" = "$go_mod" ] || fail "go.mod changed"
+    cmp -s go.mod "$E2E_DIR/expected-go.mod" || fail "go.mod changed"
     # go test through ddtest leaves no file of its own in the project.
     [ "$(project_files)" = "$files_before" ] ||
       fail "go test changed the project's files: $(project_files | tr '\n' ' ')"
@@ -354,7 +378,11 @@ run_tests() {
 
   kill "$intake_pid" 2>/dev/null || true
   trap - EXIT
-  echo "PASS ($language, $mode): the test's event reached the intake"
+  local runner=""
+  if [ "$language" = "go" ] && [ "$go_runner" != "go" ]; then
+    runner=", $go_runner"
+  fi
+  echo "PASS ($language, $mode$runner): the test's event reached the intake"
 }
 
 run_installer() {

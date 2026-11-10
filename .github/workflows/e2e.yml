@@ -92,6 +92,21 @@ jobs:
       - name: Install and run tests in one shell
         run: tests/e2e/run.sh ${{ matrix.language }} shell
 
+      # gotestsum runs go test itself, with the go that it finds on PATH: as a
+      # binary that go install put on disk, with go run, and as a tool of the
+      # module.
+      - name: gotestsum in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=gotestsum tests/e2e/run.sh go shell
+
+      - name: go run gotestsum in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=gotestsum-go-run tests/e2e/run.sh go shell
+
+      - name: go tool gotestsum in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=gotestsum-go-tool tests/e2e/run.sh go shell
+
       # Users append the JS tracer's paths to NODE_OPTIONS without quotes, so
       # on Windows the installer prints them in 8.3 form or quoted; Linux and
       # macOS do not support a folder with spaces for JS.
@@ -101,15 +116,20 @@ jobs:
 
       # Then as the GitHub action consumes it: the output goes to GITHUB_ENV,
       # and the tests run in the next step. This runs even when the shell mode
-      # failed, which still fails the job, so both consumers are checked.
+      # failed, which still fails the job, so both consumers are checked. Go
+      # runs its tests with gotestsum here; the github-action job runs go test.
       - name: Install as the GitHub action does
         id: github-install
         if: ${{ !cancelled() }}
         run: tests/e2e/run.sh ${{ matrix.language }} github-install
+        env:
+          E2E_GO_RUNNER: ${{ matrix.language == 'go' && 'gotestsum' || '' }}
 
       - name: Run tests in the next step
         if: ${{ !cancelled() && steps.github-install.outcome == 'success' }}
         run: tests/e2e/run.sh ${{ matrix.language }} github-test
+        env:
+          E2E_GO_RUNNER: ${{ matrix.language == 'go' && 'gotestsum' || '' }}
 
       # Steps in any shell, not only Bash, must find ddtest's go first.
       - name: Find ddtest's go from PowerShell
@@ -224,7 +244,7 @@ jobs:
   # The real GitLab script, at a pinned commit, sourced into the job's shell as
   # its README shows, inside the images that GitLab jobs use, as root.
   gitlab:
-    name: gitlab ${{ matrix.language }} (${{ matrix.image }})
+    name: gitlab ${{ matrix.language }} (${{ matrix.image }}${{ matrix.runner && format(', {0}', matrix.runner) || '' }})
     runs-on: ubuntu-latest
     container: ${{ matrix.image }}
     strategy:
@@ -233,6 +253,9 @@ jobs:
         include:
           - language: go
             image: golang:1.25
+          - language: go
+            image: golang:1.25
+            runner: gotestsum
           # BusyBox's sha256sum and wget, and no curl.
           - language: go
             image: golang:1.25-alpine
@@ -266,6 +289,8 @@ jobs:
       - name: Run the GitLab script and the tests in one shell
         shell: bash
         run: E2E_GITLAB_SCRIPT="$GITHUB_WORKSPACE/wrappers/gitlab/script.sh" tests/e2e/run.sh ${{ matrix.language }} gitlab
+        env:
+          E2E_GO_RUNNER: ${{ matrix.runner }}
 
   # The real CircleCI orb's script, at a pinned commit, in a step of its own
   # that writes BASH_ENV, which a later step sources.
