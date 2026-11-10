@@ -1,0 +1,536 @@
+name: End-to-End
+
+on:
+  pull_request:
+    paths:
+      - install_test_visibility.sh
+      - tests/e2e/**
+      - .github/workflows/e2e.yml
+  push:
+    branches:
+      - main
+      - codex/**
+    paths:
+      - install_test_visibility.sh
+      - tests/e2e/**
+      - .github/workflows/e2e.yml
+  # Every night too: the installer installs the latest ddtest and tracers by
+  # default, and a new release can break it without a change here.
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: e2e ${{ matrix.language }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        language:
+          - go
+          - python
+          - js
+          - java
+          - dotnet
+          - ruby
+        include:
+          # ddtest's linux/arm64 and darwin/amd64 executables.
+          - os: ubuntu-24.04-arm
+            language: go
+          - os: macos-15-intel
+            language: go
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Set up Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        if: matrix.language == 'js'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      # The runner images already have Maven.
+      - name: Set up Java
+        if: matrix.language == 'java'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up .NET
+        if: matrix.language == 'dotnet'
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Ruby
+        if: matrix.language == 'ruby'
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '3.3'
+
+      - name: Verify shell syntax
+        run: |
+          bash -n install_test_visibility.sh
+          bash -n tests/e2e/run.sh
+
+      # First, before the GitHub mode changes the job's environment: the
+      # installer's output exported in one shell, as the README, the GitLab
+      # script and the CircleCI orb consume it.
+      - name: Install and run tests in one shell
+        run: tests/e2e/run.sh ${{ matrix.language }} shell
+
+      # gotestsum runs go test itself, with the go that it finds on PATH: as a
+      # binary that go install put on disk, with go run, and as a tool of the
+      # module.
+      - name: gotestsum in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=gotestsum tests/e2e/run.sh go shell
+
+      - name: go run gotestsum in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=gotestsum-go-run tests/e2e/run.sh go shell
+
+      - name: go tool gotestsum in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=gotestsum-go-tool tests/e2e/run.sh go shell
+
+      # A script or a make target that runs go test, a module in a subfolder,
+      # with cd and with go -C, and a toolchain line that makes go switch to a
+      # newer Go than the runner's.
+      - name: go test from a script in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=script tests/e2e/run.sh go shell
+
+      - name: go test from make in one shell
+        if: matrix.language == 'go' && matrix.os != 'windows-latest'
+        run: E2E_GO_RUNNER=make tests/e2e/run.sh go shell
+
+      - name: go test in a module subfolder in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=subdir tests/e2e/run.sh go shell
+
+      - name: go -C test in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=go-C tests/e2e/run.sh go shell
+
+      - name: go test with a newer toolchain line in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_RUNNER=toolchain tests/e2e/run.sh go shell
+
+      # ddtest from a mirror of its releases, with github.com unreachable.
+      - name: Install from a ddtest mirror and run tests in one shell
+        if: matrix.language == 'go'
+        run: E2E_GO_MIRROR=1 tests/e2e/run.sh go shell
+
+      # A persistent runner, or a retry, runs the installer again over its own
+      # output.
+      - name: Install twice and run tests in one shell
+        run: E2E_INSTALL_TWICE=1 tests/e2e/run.sh ${{ matrix.language }} shell
+
+      # Users append the JS tracer's paths to NODE_OPTIONS without quotes, so
+      # on Windows the installer prints them in 8.3 form or quoted; Linux and
+      # macOS do not support a folder with spaces for JS.
+      - name: Install and run tests in one shell, from a tracer folder with spaces
+        if: matrix.language == 'js' && matrix.os == 'windows-latest'
+        run: E2E_TRACER_FOLDER="$RUNNER_TEMP/tracer folder" tests/e2e/run.sh js shell
+
+      # Without 8.3 names on the volume, the installer quotes the paths.
+      - name: Turn off 8.3 names on the temporary folder's volume
+        if: matrix.language == 'js' && matrix.os == 'windows-latest'
+        shell: pwsh
+        run: fsutil 8dot3name set ((Get-Item $env:RUNNER_TEMP).PSDrive.Name + ':') 1
+
+      - name: Install and run tests in one shell, from a folder with spaces and no 8.3 names
+        if: matrix.language == 'js' && matrix.os == 'windows-latest'
+        run: |
+          E2E_TRACER_FOLDER="$RUNNER_TEMP/no short names" tests/e2e/run.sh js shell
+          if ! grep -q ' -r "' "$RUNNER_TEMP/dd-e2e/js-shell.env"; then
+            cat "$RUNNER_TEMP/dd-e2e/js-shell.env"
+            echo "The installer did not quote the path without an 8.3 name." >&2
+            exit 1
+          fi
+
+      # Then as the GitHub action consumes it: the output goes to GITHUB_ENV,
+      # and the tests run in the next step. This runs even when the shell mode
+      # failed, which still fails the job, so both consumers are checked. Go
+      # runs its tests with gotestsum here; the github-action job runs go test.
+      - name: Install as the GitHub action does
+        id: github-install
+        if: ${{ !cancelled() }}
+        run: tests/e2e/run.sh ${{ matrix.language }} github-install
+        env:
+          E2E_GO_RUNNER: ${{ matrix.language == 'go' && 'gotestsum' || '' }}
+
+      - name: Run tests in the next step
+        if: ${{ !cancelled() && steps.github-install.outcome == 'success' }}
+        run: tests/e2e/run.sh ${{ matrix.language }} github-test
+        env:
+          E2E_GO_RUNNER: ${{ matrix.language == 'go' && 'gotestsum' || '' }}
+
+      # Steps in any shell, not only Bash, must find ddtest's go first.
+      - name: Find ddtest's go from PowerShell
+        if: ${{ !cancelled() && matrix.language == 'go' && steps.github-install.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $go = (Get-Command go).Source
+          Write-Output "go: $go"
+          if ($go -notlike '*go-shim*') { throw "go is $go, not ddtest's go command" }
+          go env GOVERSION
+
+  # A runner whose Go is older than ddtest instrument needs: the installer skips
+  # Go with a warning and lets the job continue.
+  go-too-old:
+    name: go too old (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.24'
+          cache: false
+
+      - name: Install with Go 1.24 and run the tests
+        run: tests/e2e/run.sh go skipped
+
+  # The real GitHub action, at a pinned commit, with only its installer URL and
+  # checksum pointed at this installer: its default inputs, its cache, its
+  # retries and its DD_TRACER_FOLDER, from the workspace where users run it.
+  github-action:
+    name: github action ${{ matrix.language }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+        language:
+          - go
+          - python
+          - js
+          - java
+          - dotnet
+          - ruby
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: installer
+
+      - name: Check out the GitHub action
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-visibility-github-action
+          ref: 7ce545f228901e4ac4ef0b45d946120f1c4124e0
+          path: .github/test-visibility-github-action
+          persist-credentials: false
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Set up Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        if: matrix.language == 'js'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Set up Java
+        if: matrix.language == 'java'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up .NET
+        if: matrix.language == 'dotnet'
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Ruby
+        if: matrix.language == 'ruby'
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '3.3'
+
+      - name: Write the project in the workspace
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh ${{ matrix.language }} prepare
+
+      - name: Point the action at this installer
+        run: installer/tests/e2e/run.sh ${{ matrix.language }} patch-github-action .github/test-visibility-github-action
+
+      - name: Configure Datadog Test Optimization
+        uses: ./.github/test-visibility-github-action
+        with:
+          languages: ${{ matrix.language }}
+          api_key: dummy
+
+      # The action's default go-tracer-version.
+      - name: Run tests in the next step
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh ${{ matrix.language }} test
+        env:
+          E2E_EXPECT_DDTEST_VERSION: ${{ matrix.language == 'go' && 'v1.14.0' || '' }}
+
+      - name: Find ddtest's go from PowerShell
+        if: matrix.language == 'go'
+        shell: pwsh
+        run: |
+          $go = (Get-Command go).Source
+          Write-Output "go: $go"
+          if ($go -notlike '*go-shim*') { throw "go is $go, not ddtest's go command" }
+          go env GOVERSION
+
+  # The real GitHub action with go-tracer-version set: latest, a ddtest release,
+  # and an earlier Orchestrion pin, which installs the latest ddtest.
+  github-action-go-versions:
+    name: github action go (go-tracer-version ${{ matrix.go-tracer-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - go-tracer-version: latest
+            expected: latest
+          - go-tracer-version: v1.16.0
+            expected: v1.16.0
+          - go-tracer-version: v1.8.0
+            expected: latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          path: installer
+
+      - name: Check out the GitHub action
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-visibility-github-action
+          ref: 7ce545f228901e4ac4ef0b45d946120f1c4124e0
+          path: .github/test-visibility-github-action
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Write the project in the workspace
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh go prepare
+
+      - name: Point the action at this installer
+        run: installer/tests/e2e/run.sh go patch-github-action .github/test-visibility-github-action
+
+      - name: Configure Datadog Test Optimization
+        uses: ./.github/test-visibility-github-action
+        with:
+          languages: go
+          api_key: dummy
+          go-tracer-version: ${{ matrix.go-tracer-version }}
+
+      - name: Run tests in the next step
+        run: E2E_PROJECT="$GITHUB_WORKSPACE" installer/tests/e2e/run.sh go test
+        env:
+          E2E_EXPECT_DDTEST_VERSION: ${{ matrix.expected }}
+
+  # The real GitLab script, at a pinned commit, sourced into the job's shell as
+  # its README shows, inside the images that GitLab jobs use, as root.
+  gitlab:
+    name: gitlab ${{ matrix.language }} (${{ matrix.image }}${{ matrix.runner && format(', {0}', matrix.runner) || '' }})
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: go
+            image: golang:1.25
+          - language: go
+            image: golang:1.25
+            runner: gotestsum
+          # BusyBox's sha256sum and wget, and no curl.
+          - language: go
+            image: golang:1.25-alpine
+          - language: python
+            image: python:3.12
+          - language: js
+            image: node:22
+          - language: java
+            image: maven:3.9-eclipse-temurin-21
+          - language: dotnet
+            image: mcr.microsoft.com/dotnet/sdk:8.0
+          - language: ruby
+            image: ruby:3.3
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check out the GitLab script
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-optimization-gitlab-script
+          ref: b58a82b279bc00d642c389a3c1139a81766bee18
+          path: wrappers/gitlab
+          persist-credentials: false
+
+      - name: Install Bash and Python
+        shell: sh
+        run: sh tests/e2e/prepare-container.sh
+
+      - name: Run the GitLab script and the tests in one shell
+        shell: bash
+        run: E2E_GITLAB_SCRIPT="$GITHUB_WORKSPACE/wrappers/gitlab/script.sh" tests/e2e/run.sh ${{ matrix.language }} gitlab
+        env:
+          E2E_GO_RUNNER: ${{ matrix.runner }}
+
+      # BusyBox's wget: ddtest from a mirror that requires a token in a
+      # header, and DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS, which BusyBox's
+      # wget cannot honor, refused before any download.
+      - name: Install from a ddtest mirror with BusyBox's wget
+        if: matrix.image == 'golang:1.25-alpine'
+        shell: bash
+        run: E2E_GO_MIRROR=1 tests/e2e/run.sh go shell
+
+      - name: Refuse to disable redirects with BusyBox's wget
+        if: matrix.image == 'golang:1.25-alpine'
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/redirects" && cd "$RUNNER_TEMP/redirects"
+          status=0
+          DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=go \
+            DD_SET_TRACER_REPOSITORY_URL_GO=http://127.0.0.1:9/mirror \
+            DD_SET_AUTH_HEADER_GO="Authorization: Bearer e2e" \
+            DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS=1 \
+            bash "$GITHUB_WORKSPACE/install_test_visibility.sh" > out 2> err || status=$?
+          cat err
+          [ "$status" -eq 1 ] || { echo "expected exit status 1, got $status" >&2; exit 1; }
+          grep -q 'DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS needs curl or a wget with --max-redirect' err
+
+  # The real CircleCI orb's script, at a pinned commit, in a step of its own
+  # that writes BASH_ENV, which a later step sources.
+  circleci:
+    name: circleci ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - go
+          - python
+          - js
+          - java
+          - dotnet
+          - ruby
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Check out the CircleCI orb
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          repository: DataDog/test-optimization-circleci-orb
+          ref: 3b771d563182e3a0d9509239091150d2cf430e6a
+          path: wrappers/circleci
+          persist-credentials: false
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.25'
+          cache: false
+
+      - name: Set up Python
+        if: matrix.language == 'python'
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        if: matrix.language == 'js'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '22'
+
+      - name: Set up Java
+        if: matrix.language == 'java'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up .NET
+        if: matrix.language == 'dotnet'
+        uses: actions/setup-dotnet@0f4a354dd5547a28c70b7853dbd95d5b67886e73 # v6.1.0
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Set up Ruby
+        if: matrix.language == 'ruby'
+        uses: ruby/setup-ruby@b3aaceaef7e0ee231b499e7b5f49c03fc1d32199 # v1.338.0
+        with:
+          ruby-version: '3.3'
+
+      - name: Run the orb's script, then the tests with BASH_ENV
+        run: E2E_CIRCLECI_SCRIPT="$GITHUB_WORKSPACE/wrappers/circleci/src/scripts/autoinstrument.sh" tests/e2e/run.sh ${{ matrix.language }} circleci
