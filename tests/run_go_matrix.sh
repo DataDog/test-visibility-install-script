@@ -927,7 +927,7 @@ scenario_mirror_credentials_hidden() {
     FAKE_HTTP_STATUSES=401
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "Error: Could not download https://mirror.example.com/ddtest/releases/latest/download/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "Error: Could not download <DD_SET_TRACER_REPOSITORY_URL_GO>/latest/download/SHA256SUMS."
   assert_file_contains "$LAST_STDERR" "The server answered with HTTP status 401."
   assert_file_not_contains "$LAST_STDERR" "s3cret"
   assert_go_not_instrumented
@@ -1029,7 +1029,7 @@ scenario_real_wget_credentials_hidden() {
     DD_SET_TRACER_REPOSITORY_URL_GO="http://pat-t0k3n@127.0.0.1:9/ddtest/releases"
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "http://127.0.0.1:9/ddtest/releases/latest/download/SHA256SUMS"
+  assert_file_contains "$LAST_STDERR" "Error: Could not download <DD_SET_TRACER_REPOSITORY_URL_GO>/latest/download/SHA256SUMS."
   assert_file_not_contains "$LAST_STDERR" "t0k3n"
 }
 
@@ -1073,22 +1073,25 @@ scenario_redact_urls() {
 }
 
 # Validate url_for_messages, which writes the mirror's URL in the installer's
-# own messages: the user information goes whatever it holds, then the query.
+# own messages: as it is, or the placeholder when it could hold credentials.
 scenario_url_for_messages() {
   prepare_case "url_for_messages"
   load_installer_function url_for_messages
   local input
   local expected
   while IFS='|' read -r input expected; do
-    if [ "$(url_for_messages "$input")" != "$expected" ]; then
-      fail "url_for_messages '$input' printed '$(url_for_messages "$input")', not '$expected'"
+    if [ "$(url_for_messages "$input" "<VAR>")" != "$expected" ]; then
+      fail "url_for_messages '$input' printed '$(url_for_messages "$input" "<VAR>")', not '$expected'"
     fi
   done <<'URLS'
-https://github.com/DataDog/ddtest/releases/latest/download|https://github.com/DataDog/ddtest/releases/latest/download
-https://ci:s3cret@mirror.example.com/ddtest/releases|https://mirror.example.com/ddtest/releases
-http://ci:s3cret pass@127.0.0.1:9/ddtest/releases[/latest/download|http://127.0.0.1:9/ddtest/releases[/latest/download
-https://ci:se/cr?et#x@mirror.example.com/r/download/v1.16.0?sig=abc|https://mirror.example.com/r/download/v1.16.0
-https://mirror.example.com/r/latest/download#fragment|https://mirror.example.com/r/latest/download
+https://github.com/DataDog/ddtest/releases|https://github.com/DataDog/ddtest/releases
+https://mirror.example.com/ddtest/releases|https://mirror.example.com/ddtest/releases
+https://ci:s3cret@mirror.example.com/ddtest/releases|<VAR>
+http://ci:s3cret pass@127.0.0.1:9/ddtest/releases[|<VAR>
+https://ci:se/cr?et#x@mirror.example.com/r|<VAR>
+https://mirror.example.com/r?contact=ci@example.com&access_token=s3cret|<VAR>
+https://mirror.example.com/r#contact@s3cret|<VAR>
+https://mirror.example.com/r?access_token=s3cret|<VAR>
 URLS
 }
 
@@ -1103,7 +1106,7 @@ scenario_mirror_malformed_credentials_hidden() {
     FAKE_DOWNLOAD_EXIT=3
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "Error: Could not download http://127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "Error: Could not download <DD_SET_TRACER_REPOSITORY_URL_GO>/latest/download/SHA256SUMS."
   assert_file_contains "$LAST_STDERR" "No complete response arrived: curl exited with status 3."
   assert_file_not_contains "$LAST_STDERR" "s3cret"
   assert_file_not_contains "$LAST_STDERR" "pa/ss"
@@ -1123,7 +1126,7 @@ scenario_real_curl_credentials_hidden() {
     DD_SET_TRACER_REPOSITORY_URL_GO="http://pat-t0k3n@127.0.0.1:9/ddtest/releases["
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "Error: Could not download http://127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "Error: Could not download <DD_SET_TRACER_REPOSITORY_URL_GO>/latest/download/SHA256SUMS."
   assert_file_not_contains "$LAST_STDERR" "t0k3n"
 }
 
@@ -1201,13 +1204,29 @@ scenario_real_downloader_prints_nothing() {
   wait "$REDIRECT_SERVER_PID" 2>/dev/null || true
 
   assert_exit_code 1
-  assert_file_contains "$LAST_STDERR" "/ddtest/releases/latest/download/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "Error: Could not download <DD_SET_TRACER_REPOSITORY_URL_GO>/latest/download/SHA256SUMS."
   # 500 after the redirect, or 302 from BusyBox's wget, which does not follow
   # a relative one.
   assert_file_contains "$LAST_STDERR" "The server answered with HTTP status"
   assert_file_not_contains "$LAST_STDERR" "t0k3n"
   assert_file_not_contains "$LAST_STDERR" "r3d1rect"
   assert_file_not_contains "$LAST_STDERR" "c00kie"
+}
+
+# Validate that a query with an @ before a token, in the mirror's URL, does
+# not reach the installer's message.
+scenario_mirror_query_credentials_hidden() {
+  prepare_case "mirror_query_credentials_hidden"
+
+  run_install_script \
+    DD_SET_TRACER_REPOSITORY_URL_GO="https://mirror.example.com/ddtest/releases?contact=ci@example.com&access_token=s3cret" \
+    FAKE_FAIL_DOWNLOADS=1 \
+    FAKE_HTTP_STATUSES=403
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download <DD_SET_TRACER_REPOSITORY_URL_GO>/latest/download/SHA256SUMS."
+  assert_file_not_contains "$LAST_STDERR" "s3cret"
+  assert_file_not_contains "$LAST_STDERR" "example.com"
 }
 
 main() {
@@ -1233,6 +1252,7 @@ main() {
   run_case "redact_urls" scenario_redact_urls
   run_case "url_for_messages" scenario_url_for_messages
   run_case "mirror_malformed_credentials_hidden" scenario_mirror_malformed_credentials_hidden
+  run_case "mirror_query_credentials_hidden" scenario_mirror_query_credentials_hidden
   run_case "redirect_check_under_pipefail" scenario_redirect_check_under_pipefail
   REAL_CURL="$(command -v curl || true)"
   if [ -n "$REAL_CURL" ]; then
