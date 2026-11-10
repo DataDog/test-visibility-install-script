@@ -50,7 +50,8 @@
 # must have installed, or latest for the newest release.
 # E2E_GO_MIRROR=1 makes shell mode for Go install ddtest from a mirror of its
 # releases that the intake serves, through DD_SET_TRACER_REPOSITORY_URL_GO,
-# with every other host behind a proxy that refuses connections.
+# with every other host behind a proxy that refuses connections; the mirror
+# requires the token that DD_SET_AUTH_HEADER_GO sends.
 # E2E_GO_RUNNER picks how Go runs its tests: go (go test, the default);
 # gotestsum as a binary that go install put on disk, as gotestsum-go-run with
 # go run, or as gotestsum-go-tool, a tool of the module; script, a shell script
@@ -85,9 +86,24 @@ elif [ -n "${RUNNER_TEMP:-}" ]; then
 else
   E2E_DIR="$(mktemp -d "${TMPDIR:-/tmp}/dd-e2e.XXXXXX")"
 fi
-project="${E2E_PROJECT:-$E2E_DIR/$language-$mode}"
+# Each variant of a mode has its own project and intake folders: on Windows a
+# folder that a process of an earlier step still uses cannot be removed.
+variant=""
+if [ -n "${E2E_GO_RUNNER:-}" ] && [ "$E2E_GO_RUNNER" != "go" ]; then
+  variant="$variant-$E2E_GO_RUNNER"
+fi
+if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
+  variant="$variant-twice"
+fi
+if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+  variant="$variant-mirror"
+fi
+if [ -n "${E2E_TRACER_FOLDER:-}" ]; then
+  variant="$variant-$(basename "$E2E_TRACER_FOLDER" | tr -c 'A-Za-z0-9\n' '-')"
+fi
+project="${E2E_PROJECT:-$E2E_DIR/$language-$mode$variant}"
 if [ "$mode" = "github-test" ] && [ -z "${E2E_PROJECT:-}" ]; then
-  project="$E2E_DIR/$language-github-install"
+  project="$E2E_DIR/$language-github-install$variant"
 fi
 
 is_windows() {
@@ -308,9 +324,19 @@ project_tests() {
   esac
 }
 
-intake_dir="$E2E_DIR/intake-$language-$mode"
+intake_dir="$E2E_DIR/intake-$language-$mode$variant"
 intake_pid=""
 intake_url=""
+
+# Stop the intake and wait until it has exited, so the next step finds its
+# files and folders free.
+stop_intake() {
+  if [ -n "$intake_pid" ]; then
+    kill "$intake_pid" 2>/dev/null || true
+    wait "$intake_pid" 2>/dev/null || true
+    intake_pid=""
+  fi
+}
 
 # Start the intake, which also serves this installer at
 # $intake_url/install_test_visibility.sh for the wrappers to download.
@@ -326,12 +352,12 @@ start_intake() {
   done
   [ -n "$python_bin" ] || fail "the intake needs Python"
   # Without the step's output streams: on Windows, a background process that
-  # holds them keeps the GitHub Actions step running.
-  "$python_bin" "$repo_root/tests/e2e/intake.py" "$intake_dir/port" "$intake_dir/requests.log" "$installer" "$E2E_DIR/mirror" \
-    > "$intake_dir/intake.out" 2>&1 &
+  # holds them keeps the GitHub Actions step running. In its own folder, not
+  # the project's, which Windows could not remove while the intake runs.
+  (cd "$intake_dir" && exec "$python_bin" "$repo_root/tests/e2e/intake.py" "$intake_dir/port" \
+    "$intake_dir/requests.log" "$installer" "$E2E_DIR/mirror") > "$intake_dir/intake.out" 2>&1 &
   intake_pid=$!
-  # shellcheck disable=SC2064
-  trap "kill $intake_pid 2>/dev/null || true" EXIT
+  trap stop_intake EXIT
   local _
   for _ in $(seq 1 300); do
     [ -s "$intake_dir/port" ] && break
@@ -424,7 +450,7 @@ run_tests() {
       fail "go test changed the project's files: $(project_files | tr '\n' ' ')"
   fi
 
-  kill "$intake_pid" 2>/dev/null || true
+  stop_intake
   trap - EXIT
   local runner=""
   if [ "$language" = "go" ] && [ "$go_runner" != "go" ]; then
@@ -499,8 +525,10 @@ case "$mode" in
     if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
       [ "$language" = "go" ] || fail "E2E_GO_MIRROR is for Go"
       prepare_ddtest_mirror
+      export INTAKE_MIRROR_AUTHORIZATION="Bearer e2e-mirror-token"
       start_intake
       export DD_SET_TRACER_REPOSITORY_URL_GO="$intake_url/mirror"
+      export DD_SET_AUTH_HEADER_GO="Authorization: $INTAKE_MIRROR_AUTHORIZATION"
     fi
     for run in $(seq 1 "$runs"); do
       # The second run starts with the first one's output exported: for Go,
