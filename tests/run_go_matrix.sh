@@ -715,7 +715,7 @@ use_wget_instead_of_curl() {
   mkdir -p "$CURRENT_CASE_DIR/system-bin"
   local tool
   local tool_path
-  for tool in awk basename bash cat chmod cmp cp cut dirname env grep head mkdir mktemp mv rm sed sh sha256sum shasum sort touch tr; do
+  for tool in awk basename bash cat chmod cmp cp cut dirname env grep head mkdir mktemp mv rm sed seq sh sha256sum shasum sort touch tr; do
     if tool_path="$(command -v "$tool")"; then
       ln -s "$tool_path" "$CURRENT_CASE_DIR/system-bin/$tool"
     fi
@@ -730,6 +730,11 @@ if [ "${1:-}" = "--help" ]; then
   if [ "${FAKE_BUSYBOX_WGET:-0}" != "1" ]; then
     echo "       --max-redirect=NUMBER  maximum redirections allowed per page"
   fi
+  # GNU wget's help goes on well past --max-redirect, and wget fails when a
+  # write to a closed pipe does, whether or not SIGPIPE is ignored.
+  for _ in $(seq 1 50000); do
+    echo "       --another-option       more help that a reader has to consume" 2>/dev/null || exit 141
+  done
   exit 0
 fi
 # download_with_status runs wget -S -O <file> <url>, which prints the
@@ -739,6 +744,7 @@ if [ "${1:-}" = "-S" ]; then
   code="$("$(dirname "$0")/fake-download" -w '%{http_code}' "${@:2}")" || transfer=$?
   if [ -n "$code" ] && [ "$code" != "000" ]; then
     echo "  HTTP/1.1 $code Fake" >&2
+    echo "  Set-Cookie: session=c00kie" >&2
   fi
   # wget exits 4 when the network fails, also during a transfer.
   if [ "$transfer" -ne 0 ]; then
@@ -957,6 +963,8 @@ scenario_wget_mirror_auth_header() {
   assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "SHA256SUMS | header=Authorization: Bearer t0k3n | max-redirects="
   assert_file_contains "$CURRENT_CASE_DIR/logs/requests.log" "ddtest-linux-amd64 | header=Authorization: Bearer t0k3n | max-redirects="
   assert_file_contains "$LAST_STDOUT" "PATH=$CURRENT_CASE_DIR/go-shim:"
+  # wget -S prints the response's headers, such as a mirror's cookie.
+  assert_file_not_contains "$LAST_STDERR" "c00kie"
 }
 
 # Validate that DD_SET_AUTH_HEADER_GO without a mirror fails before any
@@ -1024,6 +1032,66 @@ scenario_real_wget_credentials_hidden() {
   assert_file_not_contains "$LAST_STDERR" "t0k3n"
 }
 
+# Load one function of the installer into this shell.
+load_installer_function() {
+  # shellcheck disable=SC1090
+  source <(sed -n "/^$1()/,/^}/p" "$SCRIPT_UNDER_TEST")
+}
+
+# Validate redact_urls on messages that wget and curl print: user names and
+# queries go, also in relative and protocol-relative URLs and in a URL that
+# curl could not parse; other text stays.
+scenario_redact_urls() {
+  prepare_case "redact_urls"
+  load_installer_function redact_urls
+  local actual
+  actual="$(printf '%s\n' \
+    '--2026-11-10--  http://demo-pat:*password*@mirror.example.com/r/SHA256SUMS?sig=s1' \
+    'Location: /asset?access_token=s2 [following]' \
+    'Location: //tok3n@cdn.example.com/asset?sig=s3 [following]' \
+    'http://pat-t0k3n@127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS' \
+    'Saving to: /tmp/tracer folder/ddtest.SHA256SUMS' | redact_urls)"
+  local expected
+  expected="$(printf '%s\n' \
+    '--2026-11-10--  http://mirror.example.com/r/SHA256SUMS' \
+    'Location: /asset [following]' \
+    'Location: //cdn.example.com/asset [following]' \
+    'http://127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS' \
+    'Saving to: /tmp/tracer folder/ddtest.SHA256SUMS')"
+  if [ "$actual" != "$expected" ]; then
+    printf 'expected:\n%s\nactual:\n%s\n' "$expected" "$actual" >&2
+    fail "redact_urls kept credentials or changed other text"
+  fi
+}
+
+# Validate that the real curl's message about a URL that it cannot parse,
+# which prints the whole URL, keeps the mirror's credentials out of stderr.
+scenario_real_curl_credentials_hidden() {
+  prepare_case "real_curl_credentials_hidden"
+  use_wget_instead_of_curl
+  rm -f "$CURRENT_CASE_DIR/bin/wget"
+  ln -sf "$REAL_CURL" "$CURRENT_CASE_DIR/bin/curl"
+
+  run_install_script \
+    PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" \
+    DD_SET_TRACER_REPOSITORY_URL_GO="http://pat-t0k3n@127.0.0.1:9/ddtest/releases["
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download http://127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS."
+  assert_file_not_contains "$LAST_STDERR" "t0k3n"
+}
+
+# Validate that the check for --max-redirect reads wget's whole help, so it
+# holds under pipefail, which a closed pipe would fail.
+scenario_redirect_check_under_pipefail() {
+  prepare_case "redirect_check_under_pipefail"
+  use_wget_instead_of_curl
+  load_installer_function downloader_can_disable_redirects
+  if ! (set -o pipefail; PATH="$CURRENT_CASE_DIR/bin:$CURRENT_CASE_DIR/system-bin" downloader_can_disable_redirects); then
+    fail "a wget with --max-redirect was taken for one without it under pipefail"
+  fi
+}
+
 main() {
   run_case "latest_release" scenario_latest_release
   run_case "pinned_release" scenario_pinned_release
@@ -1044,6 +1112,10 @@ main() {
   run_case "auth_header_without_mirror" scenario_auth_header_without_mirror
   run_case "mirror_auth_header_without_redirects" scenario_mirror_auth_header_without_redirects
   run_case "busybox_wget_cannot_disable_redirects" scenario_busybox_wget_cannot_disable_redirects
+  run_case "redact_urls" scenario_redact_urls
+  run_case "redirect_check_under_pipefail" scenario_redirect_check_under_pipefail
+  REAL_CURL="$(command -v curl)"
+  run_case "real_curl_credentials_hidden" scenario_real_curl_credentials_hidden
   REAL_WGET="$(command -v wget || true)"
   if [ -n "$REAL_WGET" ] && "$REAL_WGET" --version 2>/dev/null | grep -q 'GNU Wget'; then
     run_case "real_wget_credentials_hidden" scenario_real_wget_credentials_hidden
