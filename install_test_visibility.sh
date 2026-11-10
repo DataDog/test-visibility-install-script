@@ -147,12 +147,12 @@ normalize_repository_base_url() {
 }
 
 # Print URL $1 for messages, or placeholder $2 when the URL could hold
-# credentials: user information or a query or fragment, after an @, ? or #
-# past its scheme. Nothing is cut out of such a URL, because no cut is safe
-# for every malformed one: a password can hold a ? or a space, and a query
-# an @.
+# credentials: user information or a query or fragment, anywhere an @, ? or
+# # appears, which no scheme holds. Nothing is cut out of such a URL, because
+# no cut is safe for every malformed one: a password can hold a ? or a
+# space, a query an @, and user information can even come before the scheme.
 url_for_messages() {
-  case "${1#*://}" in
+  case "$1" in
     *[@?#]*) printf '%s\n' "$2" ;;
     *) printf '%s\n' "$1" ;;
   esac
@@ -171,10 +171,12 @@ redact_urls() {
 }
 
 # Run a downloader with its messages on stderr, without the credentials of
-# the URLs that they show. Its standard output stays its own.
+# the URLs that they show. Its standard output stays its own. The messages
+# wait in ARTIFACTS_FOLDER, which the downloads need writable anyway, not in
+# a temporary directory, which can be read-only.
 run_downloader() {
   local downloader_log
-  downloader_log=$(mktemp "${TMPDIR:-/tmp}/dd-download.XXXXXX") || return 1
+  downloader_log=$(mktemp "$ARTIFACTS_FOLDER/dd-download.XXXXXX") || return 1
   local downloader_exit=0
   "$@" 2> "$downloader_log" || downloader_exit=$?
   redact_urls < "$downloader_log" >&2
