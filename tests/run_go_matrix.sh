@@ -1072,6 +1072,44 @@ scenario_redact_urls() {
   fi
 }
 
+# Validate url_for_messages, which writes the mirror's URL in the installer's
+# own messages: the user information goes whatever it holds, then the query.
+scenario_url_for_messages() {
+  prepare_case "url_for_messages"
+  load_installer_function url_for_messages
+  local input
+  local expected
+  while IFS='|' read -r input expected; do
+    if [ "$(url_for_messages "$input")" != "$expected" ]; then
+      fail "url_for_messages '$input' printed '$(url_for_messages "$input")', not '$expected'"
+    fi
+  done <<'URLS'
+https://github.com/DataDog/ddtest/releases/latest/download|https://github.com/DataDog/ddtest/releases/latest/download
+https://ci:s3cret@mirror.example.com/ddtest/releases|https://mirror.example.com/ddtest/releases
+http://ci:s3cret pass@127.0.0.1:9/ddtest/releases[/latest/download|http://127.0.0.1:9/ddtest/releases[/latest/download
+https://ci:se/cr?et#x@mirror.example.com/r/download/v1.16.0?sig=abc|https://mirror.example.com/r/download/v1.16.0
+https://mirror.example.com/r/latest/download#fragment|https://mirror.example.com/r/latest/download
+URLS
+}
+
+# Validate that the installer's own message keeps a malformed mirror URL's
+# credentials out, with a space, a slash and a question mark in the password.
+scenario_mirror_malformed_credentials_hidden() {
+  prepare_case "mirror_malformed_credentials_hidden"
+
+  run_install_script \
+    DD_SET_TRACER_REPOSITORY_URL_GO="http://ci:s3cret pa/ss?w@127.0.0.1:9/ddtest/releases[" \
+    FAKE_FAIL_DOWNLOADS=1 \
+    FAKE_DOWNLOAD_EXIT=3
+
+  assert_exit_code 1
+  assert_file_contains "$LAST_STDERR" "Error: Could not download http://127.0.0.1:9/ddtest/releases[/latest/download/SHA256SUMS."
+  assert_file_contains "$LAST_STDERR" "No complete response arrived: curl exited with status 3."
+  assert_file_not_contains "$LAST_STDERR" "s3cret"
+  assert_file_not_contains "$LAST_STDERR" "pa/ss"
+  assert_go_not_instrumented
+}
+
 # Validate that the real curl's message about a URL that it cannot parse,
 # which prints the whole URL, keeps the mirror's credentials out of stderr.
 scenario_real_curl_credentials_hidden() {
@@ -1193,6 +1231,8 @@ main() {
   run_case "mirror_auth_header_without_redirects" scenario_mirror_auth_header_without_redirects
   run_case "busybox_wget_cannot_disable_redirects" scenario_busybox_wget_cannot_disable_redirects
   run_case "redact_urls" scenario_redact_urls
+  run_case "url_for_messages" scenario_url_for_messages
+  run_case "mirror_malformed_credentials_hidden" scenario_mirror_malformed_credentials_hidden
   run_case "redirect_check_under_pipefail" scenario_redirect_check_under_pipefail
   REAL_CURL="$(command -v curl || true)"
   if [ -n "$REAL_CURL" ]; then
