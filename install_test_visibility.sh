@@ -148,9 +148,18 @@ normalize_repository_base_url() {
 
 # Print a URL for messages: without the user information, such as a token in
 # https://user:token@host, and without the query or fragment, which can carry
-# credentials too.
+# credentials too. Everything from :// to the last @ goes, whatever it holds,
+# so a malformed URL, with a space or a slash in its password, shows nothing
+# of it; a path with an @, which ddtest's releases do not have, would lose its
+# start instead.
 url_for_messages() {
-  printf '%s\n' "$1" | redact_urls
+  local url="$1"
+  case "$url" in
+    *://*@*)
+      url="${url%%://*}://${url##*@}"
+      ;;
+  esac
+  printf '%s\n' "${url%%[?#]*}"
 }
 
 # Copy standard input to standard output with every URL in it shown as
