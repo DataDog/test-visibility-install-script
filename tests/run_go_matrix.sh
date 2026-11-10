@@ -1032,10 +1032,13 @@ scenario_real_wget_credentials_hidden() {
   assert_file_not_contains "$LAST_STDERR" "t0k3n"
 }
 
-# Load one function of the installer into this shell.
+# Load one function of the installer into this shell. Bash 3.2, on macOS,
+# cannot source a process substitution.
 load_installer_function() {
-  # shellcheck disable=SC1090
-  source <(sed -n "/^$1()/,/^}/p" "$SCRIPT_UNDER_TEST")
+  local definition
+  definition="$(sed -n "/^$1()/,/^}/p" "$SCRIPT_UNDER_TEST")"
+  [ -n "$definition" ] || fail "the installer has no function $1"
+  eval "$definition"
 }
 
 # Validate redact_urls on messages that wget and curl print: user names and
@@ -1114,8 +1117,12 @@ main() {
   run_case "busybox_wget_cannot_disable_redirects" scenario_busybox_wget_cannot_disable_redirects
   run_case "redact_urls" scenario_redact_urls
   run_case "redirect_check_under_pipefail" scenario_redirect_check_under_pipefail
-  REAL_CURL="$(command -v curl)"
-  run_case "real_curl_credentials_hidden" scenario_real_curl_credentials_hidden
+  REAL_CURL="$(command -v curl || true)"
+  if [ -n "$REAL_CURL" ]; then
+    run_case "real_curl_credentials_hidden" scenario_real_curl_credentials_hidden
+  else
+    printf 'SKIP real_curl_credentials_hidden: no curl on this host\n'
+  fi
   REAL_WGET="$(command -v wget || true)"
   if [ -n "$REAL_WGET" ] && "$REAL_WGET" --version 2>/dev/null | grep -q 'GNU Wget'; then
     run_case "real_wget_credentials_hidden" scenario_real_wget_credentials_hidden
