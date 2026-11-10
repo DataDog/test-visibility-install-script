@@ -154,12 +154,14 @@ url_for_messages() {
 }
 
 # Copy standard input to standard output with every URL in it shown as
-# url_for_messages shows one: downloaders print the URLs that they fetch or
-# cannot parse, with the user name, which can be a token, and the query,
-# also in a relative redirect such as "Location: /file?token=...".
+# url_for_messages shows one, for the messages of download_file, which Java
+# uses: downloaders print the URLs that they fetch or cannot parse, with the
+# user name, which can be a token, and the query, also in a relative
+# redirect such as "Location: file?token=...". Go's downloads print nothing.
 redact_urls() {
   sed -e 's|//[^/@[:space:]]*@|//|g' \
-    -e 's|\(/[^?#[:space:]]*\)[?#][^[:space:]]*|\1|g'
+    -e 's|\(/[^?#[:space:]]*\)[?#][^[:space:]]*|\1|g' \
+    -e 's|\(Location: *[^?#[:space:]]*\)[?#][^[:space:]]*|\1|g'
 }
 
 # Run a downloader with its messages on stderr, without the credentials of
@@ -343,12 +345,17 @@ is_node_version_compliant() {
   fi
 }
 
-# Download URL $1 to file $2 and print the HTTP status of the last response,
-# after redirects, or 000 when no complete response arrived, as when the
-# network fails or the transfer stops early. download_file's exit status
-# cannot tell a missing file from other HTTP errors: curl -f exits 22, and
-# wget 8, for every one of them. Like download_file, it sends header $3 if
-# set, without following redirects when $4 is set as well.
+# Download URL $1 to file $2, quietly, and print the HTTP status of the last
+# response, after redirects, or 000 when no complete response arrived, then
+# the downloader's exit status: "200 0", "404 0", "000 6". It sends header $3
+# if set, without following redirects when $4 is set as well.
+#
+# The downloader prints nothing: its messages can name a URL that holds
+# credentials, in a form that no filter can be sure to clean, such as a
+# relative redirect, or a URL that it cannot parse. Callers report failures
+# with url_for_messages and these statuses instead. download_file's exit
+# status could not tell a missing file from other HTTP errors either: curl -f
+# exits 22, and wget 8, for every one of them.
 download_with_status() {
   local -a curl_options=()
   local -a wget_options=()
@@ -364,34 +371,47 @@ download_with_status() {
     # Without -f, curl exits 0 for an HTTP error, so a failure is a transfer
     # that did not complete.
     local curl_status
-    if curl_status=$(run_downloader curl -sSL ${curl_options[@]+"${curl_options[@]}"} -o "$2" -w '%{http_code}' "$1"); then
-      echo "$curl_status"
-    else
-      echo "000"
+    local curl_exit=0
+    curl_status=$(curl -sL ${curl_options[@]+"${curl_options[@]}"} -o "$2" -w '%{http_code}' "$1" 2>/dev/null) || curl_exit=$?
+    if [ "$curl_exit" -ne 0 ]; then
+      curl_status="000"
     fi
+    echo "$curl_status $curl_exit"
   elif command -v wget >/dev/null 2>&1; then
     # GNU wget prints each response's status line with -S, and BusyBox's
-    # prints an error's as "server returned error: HTTP/1.1 404 ...". Its
-    # messages go through a file to stderr: tee /dev/stderr would reopen, and
-    # truncate, a stderr redirected to a file.
-    # wget also fails for an HTTP error, so a failure with a 2xx status is a
+    # prints an error's as "server returned error: HTTP/1.1 404 ...". wget
+    # also fails for an HTTP error, so a failure with a 2xx status is a
     # transfer that did not complete.
     local wget_log="$2.wget-log"
     local wget_exit=0
     wget -S ${wget_options[@]+"${wget_options[@]}"} -O "$2" "$1" 2> "$wget_log" || wget_exit=$?
-    # Without the response headers that -S adds, indented by two spaces,
-    # such as Set-Cookie: only the status is needed from them.
-    grep -v '^  ' "$wget_log" | redact_urls >&2 || true
     local wget_status
     wget_status=$(awk '{ for (i = 1; i < NF; i++) if ($i ~ /^HTTP\//) status = $(i + 1) } END { print status }' "$wget_log")
     rm -f "$wget_log"
-    if [ "$wget_exit" -ne 0 ] && { [ -z "$wget_status" ] || [[ "$wget_status" == 2?? ]]; }; then
+    if [ -z "$wget_status" ] || { [ "$wget_exit" -ne 0 ] && [[ "$wget_status" == 2?? ]]; }; then
       wget_status="000"
     fi
-    echo "$wget_status"
+    echo "$wget_status $wget_exit"
   else
     >&2 echo "Error: Neither wget nor curl is installed."
+    echo "000 127"
   fi
+}
+
+# Print why a download_with_status result is a failure: the server's HTTP
+# status, or the downloader's exit status when no complete response arrived.
+download_failure_reason() {
+  local http_status="$1"
+  local downloader_exit="$2"
+  if [ "$http_status" != "000" ]; then
+    echo "The server answered with HTTP status $http_status."
+    return
+  fi
+  local downloader=wget
+  if command -v curl >/dev/null 2>&1; then
+    downloader=curl
+  fi
+  echo "No complete response arrived: $downloader exited with status $downloader_exit."
 }
 
 is_github_actions() {
@@ -753,6 +773,7 @@ install_go_tracer() {
   local download_url
   local shown_url
   local http_status
+  local downloader_exit
   while true; do
     if [ "$ddtest_version" = "latest" ]; then
       download_url="$releases_url/latest/download"
@@ -760,7 +781,7 @@ install_go_tracer() {
       download_url="$releases_url/download/$ddtest_version"
     fi
     shown_url=$(url_for_messages "$download_url")
-    http_status=$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums" "$auth_header" "$disable_redirects")
+    read -r http_status downloader_exit <<< "$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums" "$auth_header" "$disable_redirects")"
     if [[ "$http_status" == 2?? ]]; then
       break
     fi
@@ -775,9 +796,7 @@ install_go_tracer() {
       continue
     fi
     >&2 echo "Error: Could not download $shown_url/SHA256SUMS."
-    if [ -n "$http_status" ] && [ "$http_status" != "000" ]; then
-      >&2 echo "The server answered with HTTP status $http_status."
-    fi
+    >&2 download_failure_reason "$http_status" "$downloader_exit"
     return 1
   done
   local checksum
@@ -793,9 +812,11 @@ install_go_tracer() {
   # it: a failed download or a checksum mismatch keeps the installed one.
   local filepath_download
   filepath_download="$filepath_ddtest.download.$$"
-  if ! download_file "$download_url/$asset" "$filepath_download" "$auth_header" "$disable_redirects" >&2; then
+  read -r http_status downloader_exit <<< "$(download_with_status "$download_url/$asset" "$filepath_download" "$auth_header" "$disable_redirects")"
+  if [[ "$http_status" != 2?? ]]; then
     rm -f "$filepath_download"
     >&2 echo "Error: Could not download $shown_url/$asset."
+    >&2 download_failure_reason "$http_status" "$downloader_exit"
     return 1
   fi
   if ! verify_checksum "$checksum" "$filepath_download" >&2; then
