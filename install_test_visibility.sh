@@ -146,27 +146,24 @@ normalize_repository_base_url() {
   echo "$base_url"
 }
 
-# Print a URL for messages: without the user information, such as a token in
-# https://user:token@host, and without the query or fragment, which can carry
-# credentials too. Everything from :// to the last @ goes, whatever it holds,
-# so a malformed URL, with a space or a slash in its password, shows nothing
-# of it; a path with an @, which ddtest's releases do not have, would lose its
-# start instead.
+# Print URL $1 for messages, or placeholder $2 when the URL could hold
+# credentials: user information or a query or fragment, after an @, ? or #
+# past its scheme. Nothing is cut out of such a URL, because no cut is safe
+# for every malformed one: a password can hold a ? or a space, and a query
+# an @.
 url_for_messages() {
-  local url="$1"
-  case "$url" in
-    *://*@*)
-      url="${url%%://*}://${url##*@}"
-      ;;
+  case "${1#*://}" in
+    *[@?#]*) printf '%s\n' "$2" ;;
+    *) printf '%s\n' "$1" ;;
   esac
-  printf '%s\n' "${url%%[?#]*}"
 }
 
-# Copy standard input to standard output with every URL in it shown as
-# url_for_messages shows one, for the messages of download_file, which Java
-# uses: downloaders print the URLs that they fetch or cannot parse, with the
-# user name, which can be a token, and the query, also in a relative
-# redirect such as "Location: file?token=...". Go's downloads print nothing.
+# Copy standard input to standard output with the user information and the
+# query of the URLs in it removed, as far as a filter can, for the messages
+# of download_file, which Java uses: downloaders print the URLs that they
+# fetch or cannot parse, with the user name, which can be a token, and the
+# query, also in a relative redirect such as "Location: file?token=...".
+# Go's downloads print nothing.
 redact_urls() {
   sed -e 's|//[^/@[:space:]]*@|//|g' \
     -e 's|\(/[^?#[:space:]]*\)[?#][^[:space:]]*|\1|g' \
@@ -779,17 +776,23 @@ install_go_tracer() {
     >&2 echo "Error: DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS needs curl or a wget with --max-redirect, such as GNU wget: BusyBox's wget always follows redirects."
     return 1
   fi
+  # Messages show the mirror's URL, or its variable's name when the URL could
+  # hold credentials, followed by the release's path.
+  local shown_releases_url
+  shown_releases_url=$(url_for_messages "$releases_url" "<DD_SET_TRACER_REPOSITORY_URL_GO>")
+  local release_path
   local download_url
   local shown_url
   local http_status
   local downloader_exit
   while true; do
     if [ "$ddtest_version" = "latest" ]; then
-      download_url="$releases_url/latest/download"
+      release_path="latest/download"
     else
-      download_url="$releases_url/download/$ddtest_version"
+      release_path="download/$ddtest_version"
     fi
-    shown_url=$(url_for_messages "$download_url")
+    download_url="$releases_url/$release_path"
+    shown_url="$shown_releases_url/$release_path"
     read -r http_status downloader_exit <<< "$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums" "$auth_header" "$disable_redirects")"
     if [[ "$http_status" == 2?? ]]; then
       break
