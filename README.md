@@ -3,7 +3,7 @@
 A script that installs Datadog tracing libraries and prints environment variables necessary for configuring [Datadog Test Optimization](https://docs.datadoghq.com/tests/).
 The variables are printed in the following format: variableName=variableValue
 
-Supported languages are .NET, Java, Javascript, Python, Ruby and Go.
+Supported languages are .NET, Java, Javascript, Python, Ruby, Go and Rust.
 
 ## About Datadog Test Optimization
 
@@ -20,7 +20,7 @@ DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES=... DD_API_KEY=... ./install_test_visi
 
 The script parameters are
 
-- `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet`, `ruby`, `go` (multiple languages can be specified as a space-separated list).
+- `DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES`: (required) List of languages to be instrumented. Can be either `all` or any of `java`, `js`, `python`, `dotnet`, `ruby`, `go`, `rust` (multiple languages can be specified as a space-separated list). With `all`, Rust is skipped with a warning when it cannot be instrumented, such as on a runner without Cargo; see [Tracing Rust tests](#tracing-rust-tests).
 - `DD_API_KEY`: (required for .NET tracer installation) Datadog API key. Can be found at <https://app.datadoghq.com/organization-settings/api-keys>
 - `DD_TRACER_FOLDER`: (optional) The folder where the tracing libraries will be installed, defaults to `./.datadog`. For JavaScript on Linux and macOS it must not contain spaces, because the tracer's paths are appended to `NODE_OPTIONS` without quotes
 - `DD_SITE`: (optional) Datadog site, defaults to US1. See <https://docs.datadoghq.com/getting_started/site> for more information about sites.
@@ -36,6 +36,10 @@ The script parameters are
 - `DD_SET_TRACER_REPOSITORY_URL_GO`: (optional) Base URL of a mirror of [ddtest's GitHub releases](https://github.com/DataDog/ddtest/releases), for runners that cannot reach `github.com`. It must keep their layout: `<base>/latest/download/<file>` for the latest release and `<base>/download/<tag>/<file>` for a pinned one, with each release's `SHA256SUMS` and executables. Trailing slashes are tolerated. The script's messages show the URL only when it holds no user information, query or fragment, where credentials could be, such as `https://user:token@host/...`; otherwise they show `<DD_SET_TRACER_REPOSITORY_URL_GO>` in its place. Defaults to `https://github.com/DataDog/ddtest/releases`.
 - `DD_SET_AUTH_HEADER_GO`: (optional) HTTP header used to authenticate against `DD_SET_TRACER_REPOSITORY_URL_GO`, provided as a complete `Name: Value` string (e.g. `Authorization: Bearer <token>`), sent with every ddtest download. Requires `DD_SET_TRACER_REPOSITORY_URL_GO` to be set to a mirror, so the header never goes to `github.com`. Redirects are followed by default, with the same caveats as `DD_SET_AUTH_HEADER_JAVA`.
 - `DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS`: (optional) When set to any non-empty value, disables HTTP redirect following for ddtest downloads that send `DD_SET_AUTH_HEADER_GO`. It needs curl or a wget with `--max-redirect`, such as GNU wget: BusyBox's wget, on Alpine images, always follows redirects, so the script fails instead.
+- `DD_SET_TRACER_VERSION_RUST`: (optional) Version of [dd-test-rs](https://github.com/DataDog/dd-test-rs) to install for Rust, such as `v0.1.0` or `0.1.0`. If not provided, the latest release is installed. A value that names no dd-test-rs release installs the latest release with a warning.
+- `DD_SET_TRACER_REPOSITORY_URL_RUST`: (optional) Base URL of a mirror of [dd-test-rs's GitHub releases](https://github.com/DataDog/dd-test-rs/releases), for runners that cannot reach `github.com`. It must keep their layout, as described for `DD_SET_TRACER_REPOSITORY_URL_GO`, with each release's `SHA256SUMS` and archives. Messages hide a URL that could hold credentials in the same way, showing `<DD_SET_TRACER_REPOSITORY_URL_RUST>`. Defaults to `https://github.com/DataDog/dd-test-rs/releases`.
+- `DD_SET_AUTH_HEADER_RUST`: (optional) HTTP header used to authenticate against `DD_SET_TRACER_REPOSITORY_URL_RUST`, provided as a complete `Name: Value` string, sent with every dd-test-rs download. Requires `DD_SET_TRACER_REPOSITORY_URL_RUST` to be set to a mirror. Redirects are followed by default, with the same caveats as `DD_SET_AUTH_HEADER_JAVA`.
+- `DD_SET_AUTH_HEADER_RUST_DISABLE_REDIRECTS`: (optional) When set to any non-empty value, disables HTTP redirect following for dd-test-rs downloads that send `DD_SET_AUTH_HEADER_RUST`, with the same requirements as `DD_SET_AUTH_HEADER_GO_DISABLE_REDIRECTS`.
 - `DD_INSTRUMENTATION_BUILD_SYSTEM_JAVA`: (optional) A hint for Java instrumentation to instrument a specific build system. Allowed values are `maven`, `gradle`, `sbt`, `ant`, and `all`. If not specified, every Maven, Gradle, SBT, and Ant build will be instrumented. `all` is a special value that allows instrumenting _every JVM process_.
 
 The script will install the libraries and print the list of environment variables that should be set in order to enable Test Optimization. Example output:
@@ -68,6 +72,18 @@ Go tests report through [`ddtest instrument`](https://github.com/DataDog/ddtest/
 - Linux, macOS and Windows, from Git Bash, on `amd64` and `arm64` are supported; elsewhere the script skips Go with a warning.
 - Tests must run on the same machine or container and as the same user as the script, since ddtest's `go` command lives in that user's cache directory: a Docker container action that runs the tests does not find it. No later step may put another `go` before ddtest's on `PATH`, such as installing Go again after running the script; otherwise `go test` runs without Test Optimization.
 - With Test Impact Analysis enabled, build the tests with coverage in count or atomic mode, such as `go test -cover -covermode=atomic ./...`, so each test reports the code it ran.
+
+### Tracing Rust tests
+
+Rust tests report through [dd-test-rs](https://github.com/DataDog/dd-test-rs). The script downloads the release archive for the runner into `DD_TRACER_FOLDER`, checks it against the release's `SHA256SUMS` and unpacks `dd-test-wrapper`. It prints `RUSTC_WORKSPACE_WRAPPER` with the wrapper's absolute path, so `cargo test` and `cargo nextest run` report to Test Optimization without changes to the project. A `RUSTC_WORKSPACE_WRAPPER` that is already set is replaced, with a warning. Tools set through `RUSTC_WRAPPER`, such as sccache, keep working.
+
+- The runner needs Cargo and Rust 1.81 or newer.
+- Linux and macOS on `amd64` and `arm64` are supported. On Windows the script skips Rust with a warning.
+- When `rust` is requested and Cargo or `rustc` is missing, or Rust is older than 1.81, the script fails. With `all`, it skips Rust with a warning instead.
+- The first build with the wrapper recompiles the workspace crates, because Cargo includes the wrapper in its build fingerprint. Dependencies stay cached.
+- Test binaries start the wrapper from the absolute path that built them, so tests must run on the same machine or container as the script. To run test binaries elsewhere, set `DD_TEST_AGENT` to the wrapper's path there.
+- Doctests, tests with a custom harness (`harness = false` or `#![test_runner]`) and test builds with `panic = "abort"` run normally but are not reported.
+- Test Impact Analysis and code coverage are not supported.
 
 ### Tracing vitest tests
 

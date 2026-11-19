@@ -24,6 +24,9 @@ DEFAULT_DDTEST_RELEASES_URL="https://github.com/DataDog/ddtest/releases"
 DDTEST_MINIMUM_VERSION="v1.14.0"
 DDTEST_MINIMUM_GO_VERSION="1.25.0"
 
+DEFAULT_DD_TEST_RS_RELEASES_URL="https://github.com/DataDog/dd-test-rs/releases"
+DD_TEST_RS_MINIMUM_RUST_VERSION="1.81.0"
+
 extract_major_version() {
   echo "$1" | cut -d '.' -f 1
 }
@@ -884,6 +887,211 @@ install_go_tracer() {
   echo "DD_TRACER_VERSION_GO=$("$filepath_ddtest" --version)"
 }
 
+# Print the name of dd-test-rs's release archive for this host, or fail when
+# dd-test-rs publishes none for it.
+dd_test_rs_release_asset() {
+  local os
+  local arch
+  case "$(uname -s)" in
+    Linux) os=linux ;;
+    Darwin) os=darwin ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -m)" in
+    x86_64|amd64) arch=amd64 ;;
+    aarch64|arm64) arch=arm64 ;;
+    *) return 1 ;;
+  esac
+  echo "dd-test-wrapper-$os-$arch.tar.gz"
+}
+
+# Report why Rust cannot be instrumented: as an error, or, with languages set
+# to all, as a warning that skips Rust, so that jobs without a Rust toolchain
+# keep working.
+rust_unavailable() {
+  if [ "$instrument_all_languages" = true ]; then
+    >&2 echo "Warning: $1"
+    >&2 echo "Skipping Rust instrumentation."
+    return 0
+  fi
+  >&2 echo "Error: $1"
+  return 1
+}
+
+# Print the release tag that URL $1 redirects to, as GitHub redirects
+# releases/latest to releases/tag/<tag>, or nothing. It sends header $2 if set,
+# and prints nothing when $3 disables redirects.
+release_tag_of() {
+  if [ -n "${3:-}" ]; then
+    return 0
+  fi
+  local -a curl_options=()
+  local -a wget_options=()
+  if [ -n "${2:-}" ]; then
+    curl_options=(-H "$2")
+    wget_options=("--header=$2")
+  fi
+  local url=""
+  if command -v curl >/dev/null 2>&1; then
+    url=$(curl -sIL ${curl_options[@]+"${curl_options[@]}"} -o /dev/null -w '%{url_effective}' "$1" 2>/dev/null) || url=""
+  elif command -v wget >/dev/null 2>&1; then
+    url=$(wget -S --spider ${wget_options[@]+"${wget_options[@]}"} "$1" 2>&1 | awk '$1 == "Location:" { location = $2 } END { print location }')
+  fi
+  url="${url%%[?#]*}"
+  local tag="${url##*/}"
+  if [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "$tag"
+  fi
+}
+
+install_rust_tracer() {
+  local asset
+  if ! asset=$(dd_test_rs_release_asset); then
+    >&2 echo "Warning: dd-test-rs has no release for $(uname -s) $(uname -m)."
+    >&2 echo "Skipping Rust instrumentation."
+    return 0
+  fi
+
+  if ! command -v cargo >/dev/null 2>&1; then
+    rust_unavailable "cargo is not installed."
+    return
+  fi
+  if ! command -v rustc >/dev/null 2>&1; then
+    rust_unavailable "rustc is not installed."
+    return
+  fi
+  local rustc_version_output
+  if ! rustc_version_output=$(rustc --version); then
+    rust_unavailable "rustc --version failed."
+    return
+  fi
+  local installed_rust_version
+  installed_rust_version=$(echo "$rustc_version_output" | awk '{ print $2 }')
+  if ! [[ "$installed_rust_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+    rust_unavailable "Could not read the Rust version from: $rustc_version_output"
+    return
+  fi
+  if ! version_ge "$installed_rust_version" "$DD_TEST_RS_MINIMUM_RUST_VERSION"; then
+    rust_unavailable "Rust $DD_TEST_RS_MINIMUM_RUST_VERSION or newer is required, got $rustc_version_output"
+    return
+  fi
+
+  local unusable_version_warning="Warning: DD_SET_TRACER_VERSION_RUST=$DD_SET_TRACER_VERSION_RUST is not a dd-test-rs release. Installing the latest dd-test-rs release."
+  local rust_tracer_version="${DD_SET_TRACER_VERSION_RUST:-latest}"
+  if [ "$rust_tracer_version" != "latest" ]; then
+    if [[ "$rust_tracer_version" =~ ^[0-9] ]]; then
+      rust_tracer_version="v$rust_tracer_version"
+    fi
+    if ! [[ "$rust_tracer_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      >&2 echo "$unusable_version_warning"
+      rust_tracer_version="latest"
+    fi
+  fi
+
+  # Test binaries start the wrapper from the path that built them, so it must
+  # be absolute.
+  local filepath_wrapper
+  filepath_wrapper="$(cd "$ARTIFACTS_FOLDER" && pwd)/dd-test-wrapper"
+  local filepath_checksums
+  filepath_checksums="$ARTIFACTS_FOLDER/dd-test-rs.SHA256SUMS"
+
+  local releases_url
+  releases_url=$(normalize_repository_base_url "${DD_SET_TRACER_REPOSITORY_URL_RUST:-$DEFAULT_DD_TEST_RS_RELEASES_URL}")
+  local auth_header="${DD_SET_AUTH_HEADER_RUST:-}"
+  if [ -n "$auth_header" ] && [ "$releases_url" = "$DEFAULT_DD_TEST_RS_RELEASES_URL" ]; then
+    >&2 echo "Error: DD_SET_AUTH_HEADER_RUST requires DD_SET_TRACER_REPOSITORY_URL_RUST to be set to a mirror of dd-test-rs's releases."
+    return 1
+  fi
+  local disable_redirects="${DD_SET_AUTH_HEADER_RUST_DISABLE_REDIRECTS:-}"
+  if [ -n "$auth_header" ] && [ -n "$disable_redirects" ] && ! downloader_can_disable_redirects; then
+    >&2 echo "Error: DD_SET_AUTH_HEADER_RUST_DISABLE_REDIRECTS needs curl or a wget with --max-redirect, such as GNU wget: BusyBox's wget always follows redirects."
+    return 1
+  fi
+  local shown_releases_url
+  shown_releases_url=$(url_for_messages "$releases_url" "<DD_SET_TRACER_REPOSITORY_URL_RUST>")
+  local release_path
+  local download_url
+  local shown_url
+  local http_status
+  local downloader_exit
+  while true; do
+    if [ "$rust_tracer_version" = "latest" ]; then
+      release_path="latest/download"
+    else
+      release_path="download/$rust_tracer_version"
+    fi
+    download_url="$releases_url/$release_path"
+    shown_url="$shown_releases_url/$release_path"
+    read -r http_status downloader_exit <<< "$(download_with_status "$download_url/SHA256SUMS" "$filepath_checksums" "$auth_header" "$disable_redirects")"
+    if [[ "$http_status" == 2?? ]]; then
+      break
+    fi
+    rm -f "$filepath_checksums"
+    if [ "$rust_tracer_version" != "latest" ] && [ "$http_status" = "404" ]; then
+      >&2 echo "$unusable_version_warning"
+      rust_tracer_version="latest"
+      continue
+    fi
+    >&2 echo "Error: Could not download $shown_url/SHA256SUMS."
+    >&2 download_failure_reason "$http_status" "$downloader_exit"
+    return 1
+  done
+  local checksum
+  checksum=$(awk -v name="$asset" '$2 == name || $2 == "*" name { print $1 }' "$filepath_checksums")
+  rm -f "$filepath_checksums"
+  if [ -z "$checksum" ]; then
+    >&2 echo "Error: The dd-test-rs release at $shown_url has no $asset."
+    return 1
+  fi
+
+  # Test binaries that an earlier installation built start filepath_wrapper,
+  # so the new one is unpacked beside it and then renamed over it: a failed
+  # download or a checksum mismatch keeps the installed one.
+  local filepath_archive
+  filepath_archive="$ARTIFACTS_FOLDER/$asset.download.$$"
+  local extract_dir
+  extract_dir="$filepath_wrapper.download.$$"
+  read -r http_status downloader_exit <<< "$(download_with_status "$download_url/$asset" "$filepath_archive" "$auth_header" "$disable_redirects")"
+  if [[ "$http_status" != 2?? ]]; then
+    rm -f "$filepath_archive"
+    >&2 echo "Error: Could not download $shown_url/$asset."
+    >&2 download_failure_reason "$http_status" "$downloader_exit"
+    return 1
+  fi
+  if ! verify_checksum "$checksum" "$filepath_archive" >&2; then
+    rm -f "$filepath_archive"
+    >&2 echo "Error: $asset does not match the checksum in the dd-test-rs release."
+    return 1
+  fi
+  if ! { mkdir -p "$extract_dir" &&
+         tar -xzf "$filepath_archive" -C "$extract_dir" dd-test-wrapper >&2 &&
+         chmod +x "$extract_dir/dd-test-wrapper" &&
+         mv -f "$extract_dir/dd-test-wrapper" "$filepath_wrapper"; }; then
+    rm -rf "$filepath_archive" "$extract_dir"
+    >&2 echo "Error: Could not install dd-test-wrapper in $filepath_wrapper."
+    return 1
+  fi
+  rm -rf "$filepath_archive" "$extract_dir"
+
+  # Releases without dd-test-wrapper --version, such as v0.1.0, take their
+  # version from the release that the script downloaded.
+  local wrapper_version
+  wrapper_version=$("$filepath_wrapper" --version 2>/dev/null | grep -o -E '[0-9]+\.[0-9]+\.[0-9]+' | sed -n '1p') || wrapper_version=""
+  if [ -n "$wrapper_version" ]; then
+    rust_tracer_version="v$wrapper_version"
+  elif [ "$rust_tracer_version" = "latest" ]; then
+    rust_tracer_version=$(release_tag_of "$releases_url/latest" "$auth_header" "$disable_redirects")
+  fi
+
+  if [ -n "${RUSTC_WORKSPACE_WRAPPER:-}" ] && [ "$RUSTC_WORKSPACE_WRAPPER" != "$filepath_wrapper" ]; then
+    >&2 echo "Warning: RUSTC_WORKSPACE_WRAPPER=$RUSTC_WORKSPACE_WRAPPER is replaced with $filepath_wrapper for Rust instrumentation."
+  fi
+  echo "RUSTC_WORKSPACE_WRAPPER=$filepath_wrapper"
+  if [ -n "$rust_tracer_version" ]; then
+    echo "DD_TRACER_VERSION_RUST=$rust_tracer_version"
+  fi
+}
+
 # set common environment variables
 echo "DD_CIVISIBILITY_ENABLED=true"
 echo "DD_CIVISIBILITY_AGENTLESS_ENABLED=true"
@@ -894,8 +1102,10 @@ fi
 
 # install tracer libraries
 if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
+  instrument_all_languages=false
   if [ "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" = "all" ]; then
-    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet ruby go"
+    instrument_all_languages=true
+    DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="java js python dotnet ruby go rust"
   fi
 
   for lang in $( echo "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" )
@@ -919,13 +1129,16 @@ if [ -n "$DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES" ]; then
       go)
         install_go_tracer
         ;;
+      rust)
+        install_rust_tracer
+        ;;
       *)
-        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet, ruby, go"
+        >&2 echo "Unknown language: $lang. Must be one of: java, js, python, dotnet, ruby, go, rust"
         exit 1;
         ;;
     esac
   done
 else
-  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby, go"
+  >&2 echo "Error: DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES environment variable should be set to all or a space-separated subset of java, js, python, dotnet, ruby, go, rust"
   exit 1;
 fi

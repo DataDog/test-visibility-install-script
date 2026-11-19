@@ -38,12 +38,22 @@ jobs:
           - java
           - dotnet
           - ruby
+          - rust
+        exclude:
+          # dd-test-rs has no Windows release: the rust-skipped job checks
+          # that the installer skips Rust there.
+          - os: windows-latest
+            language: rust
         include:
-          # ddtest's linux/arm64 and darwin/amd64 executables.
+          # ddtest's and dd-test-rs's linux/arm64 and darwin/amd64 executables.
           - os: ubuntu-24.04-arm
             language: go
           - os: macos-15-intel
             language: go
+          - os: ubuntu-24.04-arm
+            language: rust
+          - os: macos-15-intel
+            language: rust
     defaults:
       run:
         shell: bash
@@ -91,6 +101,12 @@ jobs:
         with:
           ruby-version: '3.3'
 
+      - name: Set up Rust
+        if: matrix.language == 'rust'
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
       - name: Verify shell syntax
         run: |
           bash -n install_test_visibility.sh
@@ -101,6 +117,8 @@ jobs:
       # script and the CircleCI orb consume it.
       - name: Install and run tests in one shell
         run: tests/e2e/run.sh ${{ matrix.language }} shell
+        env:
+          E2E_EXPECT_RUST_VERSION: ${{ matrix.language == 'rust' && 'latest' || '' }}
 
       # gotestsum runs go test itself, with the go that it finds on PATH: as a
       # binary that go install put on disk, with go run, and as a tool of the
@@ -144,6 +162,21 @@ jobs:
       - name: Install from a ddtest mirror and run tests in one shell
         if: matrix.language == 'go'
         run: E2E_GO_MIRROR=1 tests/e2e/run.sh go shell
+
+      # A pinned dd-test-rs release, without the v prefix, and a pin
+      # that names no release, which installs the latest one.
+      - name: Install a pinned dd-test-rs and run tests in one shell
+        if: matrix.language == 'rust'
+        run: DD_SET_TRACER_VERSION_RUST=0.1.0 E2E_EXPECT_RUST_VERSION=v0.1.0 tests/e2e/run.sh rust shell
+
+      - name: Install the latest dd-test-rs for an unpublished pin and run tests in one shell
+        if: matrix.language == 'rust'
+        run: DD_SET_TRACER_VERSION_RUST=v0.99.0 E2E_EXPECT_RUST_VERSION=latest tests/e2e/run.sh rust shell
+
+      # dd-test-rs from a mirror of its releases, with github.com unreachable.
+      - name: Install from a dd-test-rs mirror and run tests in one shell
+        if: matrix.language == 'rust'
+        run: E2E_RUST_MIRROR=1 tests/e2e/run.sh rust shell
 
       # A persistent runner, or a retry, runs the installer again over its own
       # output.
@@ -228,6 +261,42 @@ jobs:
 
       - name: Install with Go 1.24 and run the tests
         run: tests/e2e/run.sh go skipped
+
+  # Where Rust cannot be instrumented: on Windows, which dd-test-rs has no
+  # release for, the installer skips Rust. Without cargo, or with a Rust older
+  # than 1.81, it fails when rust is requested and skips Rust under all.
+  rust-skipped:
+    name: rust skipped (${{ matrix.reason }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            reason: os
+          - os: ubuntu-latest
+            reason: no-cargo
+          - os: macos-latest
+            reason: no-cargo
+          - os: ubuntu-latest
+            reason: too-old
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install ${{ matrix.reason == 'too-old' && '1.80.0' || 'stable' }} --profile minimal
+          rustup default ${{ matrix.reason == 'too-old' && '1.80.0' || 'stable' }}
+
+      - name: Install where Rust cannot be instrumented and run the tests
+        run: tests/e2e/run.sh rust skipped
+        env:
+          E2E_RUST_SKIP_REASON: ${{ matrix.reason }}
 
   # The real GitHub action, at a pinned commit, with only its installer URL and
   # checksum pointed at this installer: its default inputs, its cache, its
