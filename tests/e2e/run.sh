@@ -10,6 +10,7 @@
 #   tests/e2e/run.sh <language> patch-github-action <dir>
 #   tests/e2e/run.sh <language> test                        (E2E_PROJECT)
 #   tests/e2e/run.sh go skipped                             (Go older than 1.25)
+#   tests/e2e/run.sh rust skipped                           (E2E_RUST_SKIP_REASON)
 #
 # Each run builds a small project with one passing test for the language, runs
 # the installer from the project, runs the project's tests with what the
@@ -31,27 +32,34 @@
 #   installer, which the intake serves.
 # - skipped runs the installer with a Go too old for ddtest instrument, which it
 #   skips with a warning and exit status 0, and then the tests, which still
-#   pass, without Test Optimization.
+#   pass, without Test Optimization. For Rust, E2E_RUST_SKIP_REASON says why
+#   Rust cannot be instrumented: os, on Windows, where dd-test-rs has no
+#   release and the installer skips Rust; no-cargo, with cargo and rustc off
+#   PATH; or too-old, with a Rust older than 1.81. For the last two, the
+#   installer fails when rust is requested and skips Rust under all.
 # - prepare, patch-github-action and test run the real GitHub action across a
 #   job's steps: prepare writes the project in E2E_PROJECT, the workspace that
 #   the action installs from; patch-github-action points a checkout of the
 #   action at this installer; a later step uses the action; test then runs the
 #   tests.
 #
-# Languages: go, python, js, java, dotnet, ruby. The runner needs the
+# Languages: go, python, js, java, dotnet, ruby, rust. The runner needs the
 # language's toolchain: Go 1.25 or newer, Python with venv, Node.js with npm,
-# a JDK with Maven, the .NET SDK, or Ruby with Bundler; and Python for the
-# intake. E2E_DIR (default $RUNNER_TEMP/dd-e2e, else a new temporary
-# directory) holds the projects and the intake's files. E2E_TRACER_FOLDER, if
-# set, becomes the installer's DD_TRACER_FOLDER, such as a folder with spaces.
+# a JDK with Maven, the .NET SDK, Ruby with Bundler, or Rust 1.81 or newer
+# with Cargo; and Python for the intake. E2E_DIR (default $RUNNER_TEMP/dd-e2e,
+# else a new temporary directory) holds the projects and the intake's files.
+# E2E_TRACER_FOLDER, if set, becomes the installer's DD_TRACER_FOLDER, such as
+# a folder with spaces.
 # E2E_INSTALL_TWICE=1 makes shell mode run the installer a second time with the
 # first run's output exported, as a persistent runner or a retry does.
 # E2E_EXPECT_DDTEST_VERSION, for Go, is the ddtest release that the installer
 # must have installed, or latest for the newest release.
+# E2E_EXPECT_RUST_VERSION does the same for Rust and dd-test-rs.
 # E2E_GO_MIRROR=1 makes shell mode for Go install ddtest from a mirror of its
 # releases that the intake serves, through DD_SET_TRACER_REPOSITORY_URL_GO,
 # with every other host behind a proxy that refuses connections; the mirror
-# requires the token that DD_SET_AUTH_HEADER_GO sends.
+# requires the token that DD_SET_AUTH_HEADER_GO sends. E2E_RUST_MIRROR=1 does
+# the same for Rust, dd-test-rs and the *_RUST variables.
 # E2E_GO_RUNNER picks how Go runs its tests: go (go test, the default);
 # gotestsum as a binary that go install put on disk, as gotestsum-go-run with
 # go run, or as gotestsum-go-tool, a tool of the module; script, a shell script
@@ -74,7 +82,7 @@ fail() {
 }
 
 case "$language" in
-  go|python|js|java|dotnet|ruby) ;;
+  go|python|js|java|dotnet|ruby|rust) ;;
   *) fail "unknown language" ;;
 esac
 
@@ -95,8 +103,11 @@ fi
 if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
   variant="$variant-twice"
 fi
-if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+if [ "${E2E_GO_MIRROR:-}" = "1" ] || [ "${E2E_RUST_MIRROR:-}" = "1" ]; then
   variant="$variant-mirror"
+fi
+if [ -n "${DD_SET_TRACER_VERSION_RUST:-}" ]; then
+  variant="$variant-$DD_SET_TRACER_VERSION_RUST"
 fi
 if [ -n "${E2E_TRACER_FOLDER:-}" ]; then
   variant="$variant-$(basename "$E2E_TRACER_FOLDER" | tr -c 'A-Za-z0-9\n' '-')"
@@ -288,6 +299,25 @@ RUBY
       bundle config set --local path vendor/bundle >&2
       bundle install --quiet >&2
       ;;
+    rust)
+      cat > Cargo.toml <<'TOML'
+[package]
+name = "install-script-e2e"
+version = "0.1.0"
+edition = "2021"
+TOML
+      mkdir src
+      cat > src/lib.rs <<'RUST'
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[allow(non_snake_case)]
+    fn DdE2eMarker() {
+        assert!(std::env::var("E2E_FAIL").as_deref() != Ok("1"), "failing on purpose");
+    }
+}
+RUST
+      ;;
   esac
 }
 
@@ -321,7 +351,16 @@ project_tests() {
     java) mvn -B -q test ;;
     dotnet) dotnet test --no-build ;;
     ruby) bundle exec rspec ;;
+    rust) cargo test ;;
   esac
+}
+
+# Print the tag of a GitHub repository's latest release, to which GitHub
+# redirects releases/latest.
+latest_release_tag() {
+  local url
+  url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' "https://github.com/$1/releases/latest")"
+  echo "${url##*/}"
 }
 
 intake_dir="$E2E_DIR/intake-$language-$mode$variant"
@@ -422,6 +461,21 @@ run_tests() {
     fi
   fi
 
+  if [ "$language" = "rust" ]; then
+    if E2E_FAIL=1 project_tests > "$test_log" 2>&1; then
+      cat "$test_log" >&2
+      fail "a failing Rust test must fail cargo test"
+    fi
+    if [ -n "${E2E_EXPECT_RUST_VERSION:-}" ]; then
+      local expected_version="$E2E_EXPECT_RUST_VERSION"
+      if [ "$expected_version" = "latest" ]; then
+        expected_version="$(latest_release_tag DataDog/dd-test-rs)"
+      fi
+      [ "${DD_TRACER_VERSION_RUST:-}" = "$expected_version" ] ||
+        fail "dd-test-rs ${DD_TRACER_VERSION_RUST:-?} was installed, not $expected_version"
+    fi
+  fi
+
   if [ "$language" = "go" ]; then
     # go test, and gotestsum around it, keep their exit status through
     # ddtest's go.
@@ -433,9 +487,7 @@ run_tests() {
     if [ -n "${E2E_EXPECT_DDTEST_VERSION:-}" ]; then
       local expected_version="$E2E_EXPECT_DDTEST_VERSION"
       if [ "$expected_version" = "latest" ]; then
-        # GitHub redirects releases/latest to the newest release's tag.
-        expected_version="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/DataDog/ddtest/releases/latest)"
-        expected_version="${expected_version##*/}"
+        expected_version="$(latest_release_tag DataDog/ddtest)"
       fi
       [ "${DD_TRACER_VERSION_GO:-}" = "$expected_version" ] ||
         fail "ddtest ${DD_TRACER_VERSION_GO:-?} was installed, not $expected_version"
@@ -459,7 +511,7 @@ run_tests() {
   if [ "${E2E_INSTALL_TWICE:-}" = "1" ]; then
     runner="$runner, installed twice"
   fi
-  if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
+  if [ "${E2E_GO_MIRROR:-}" = "1" ] || [ "${E2E_RUST_MIRROR:-}" = "1" ]; then
     grep -q '^GET /mirror/latest/download/SHA256SUMS' "$intake_dir/requests.log" ||
       fail "the installer did not download from the mirror"
     runner="$runner, from a mirror"
@@ -471,7 +523,7 @@ run_installer() {
   # BusyBox's wget ignores no_proxy, so it would send the mirror's requests to
   # the proxy too: with it, the mirror is used without blocking other hosts,
   # which the curl and GNU wget runs check.
-  if [ "${E2E_GO_MIRROR:-}" = "1" ] && { command -v curl >/dev/null 2>&1 || ! wget --help 2>&1 | grep -q BusyBox; }; then
+  if { [ "${E2E_GO_MIRROR:-}" = "1" ] || [ "${E2E_RUST_MIRROR:-}" = "1" ]; } && { command -v curl >/dev/null 2>&1 || ! wget --help 2>&1 | grep -q BusyBox; }; then
     # Only the mirror, on this host, is reachable: github.com is not.
     https_proxy=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 \
       http_proxy=http://127.0.0.1:9 HTTP_PROXY=http://127.0.0.1:9 \
@@ -482,18 +534,26 @@ run_installer() {
   DD_CIVISIBILITY_INSTRUMENTATION_LANGUAGES="$language" bash "$installer"
 }
 
-# Copy the latest ddtest release's SHA256SUMS and this host's executable into
-# a mirror with the layout of ddtest's GitHub releases.
-prepare_ddtest_mirror() {
-  local asset
+# Copy the latest release's SHA256SUMS and this host's executable, of ddtest
+# for Go or dd-test-rs for Rust, into a mirror with the layout of their GitHub
+# releases.
+prepare_release_mirror() {
+  local repository=DataDog/ddtest
+  local asset=ddtest
+  local suffix=""
+  if [ "$language" = "rust" ]; then
+    repository=DataDog/dd-test-rs
+    asset=dd-test-wrapper
+    suffix=".tar.gz"
+  fi
   case "$(uname -s)" in
-    Linux) asset=ddtest-linux ;;
-    Darwin) asset=ddtest-darwin ;;
-    *) asset=ddtest-windows ;;
+    Linux) asset="$asset-linux" ;;
+    Darwin) asset="$asset-darwin" ;;
+    *) asset="$asset-windows" ;;
   esac
   case "$(uname -m)" in
-    aarch64|arm64) asset="$asset-arm64" ;;
-    *) asset="$asset-amd64" ;;
+    aarch64|arm64) asset="$asset-arm64$suffix" ;;
+    *) asset="$asset-amd64$suffix" ;;
   esac
   if is_windows; then
     asset="$asset.exe"
@@ -504,13 +564,88 @@ prepare_ddtest_mirror() {
   local file
   local url
   for file in SHA256SUMS "$asset"; do
-    url="https://github.com/DataDog/ddtest/releases/latest/download/$file"
+    url="https://github.com/$repository/releases/latest/download/$file"
     if command -v curl >/dev/null 2>&1; then
       curl -fsSL -o "$folder/$file" "$url" || fail "could not copy $file into the mirror"
     else
       wget -q -O "$folder/$file" "$url" || fail "could not copy $file into the mirror"
     fi
   done
+}
+
+# Print PATH without the directories that hold cargo or rustc.
+path_without_rust() {
+  local result=""
+  local dir
+  local IFS=:
+  for dir in $PATH; do
+    if [ ! -e "$dir/cargo" ] && [ ! -e "$dir/rustc" ]; then
+      result="${result:+$result:}$dir"
+    fi
+  done
+  echo "$result"
+}
+
+# Run the installer's Rust installation as languages set to all runs it. The
+# installer itself cannot run here with all, since the other languages need
+# their own toolchains and projects.
+run_rust_installer_as_all() {
+  (
+    eval "$(sed '/^# set common environment variables/,$d' "$installer")"
+    # shellcheck disable=SC2034
+    instrument_all_languages=true
+    install_rust_tracer
+  )
+}
+
+# Check that the installer did not configure Rust: it printed no Rust
+# setting and downloaded nothing.
+assert_rust_not_instrumented() {
+  ! grep -qE '^(RUSTC_WORKSPACE_WRAPPER|DD_TRACER_VERSION_RUST)=' "$1" || fail "the installer printed Rust settings"
+  [ ! -e .datadog/dd-test-wrapper ] || fail "the installer downloaded dd-test-wrapper"
+}
+
+# Run the installer where Rust cannot be instrumented, for E2E_RUST_SKIP_REASON,
+# and then the tests, which still pass without Test Optimization.
+run_rust_skipped() {
+  local reason="${E2E_RUST_SKIP_REASON:?skipped for Rust needs E2E_RUST_SKIP_REASON}"
+  local out="$E2E_DIR/rust-skipped.env"
+  local err="$E2E_DIR/rust-skipped.err"
+  local message
+  case "$reason" in
+    os) message="dd-test-rs has no release for" ;;
+    no-cargo) message="cargo is not installed." ;;
+    too-old) message="Rust 1.81.0 or newer is required" ;;
+    *) fail "unknown E2E_RUST_SKIP_REASON: $reason" ;;
+  esac
+  new_project
+  unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
+  local rust_path="$PATH"
+  if [ "$reason" = "no-cargo" ]; then
+    rust_path="$(path_without_rust)"
+    ! PATH="$rust_path" command -v cargo >/dev/null 2>&1 || fail "cargo is still on PATH"
+  fi
+  local status=0
+  PATH="$rust_path" run_installer > "$out" 2> "$err" || status=$?
+  cat "$err" >&2
+  if [ "$reason" = "os" ]; then
+    [ "$status" -eq 0 ] || fail "the installer must let the job continue, exit status $status"
+    grep -q "^Warning: $message" "$err" || fail "no warning: $message"
+    grep -q '^Skipping Rust instrumentation.' "$err" || fail "Rust was not skipped"
+  else
+    [ "$status" -eq 1 ] || fail "the installer must fail when rust is requested, exit status $status"
+    grep -q "^Error: $message" "$err" || fail "no error: $message"
+    assert_rust_not_instrumented "$out"
+    status=0
+    PATH="$rust_path" run_rust_installer_as_all > "$out" 2> "$err" || status=$?
+    cat "$err" >&2
+    [ "$status" -eq 0 ] || fail "all must skip Rust, exit status $status"
+    grep -q "^Warning: $message" "$err" || fail "no warning under all: $message"
+    grep -q '^Skipping Rust instrumentation.' "$err" || fail "Rust was not skipped under all"
+  fi
+  assert_rust_not_instrumented "$out"
+  cargo test >&2 || fail "the tests must still pass with plain cargo test"
+  echo "PASS (rust, skipped, $reason): Rust skipped; the tests ran without Test Optimization"
 }
 
 # Make an empty project directory, write the project in it and enter it.
@@ -532,11 +667,19 @@ case "$mode" in
     fi
     if [ "${E2E_GO_MIRROR:-}" = "1" ]; then
       [ "$language" = "go" ] || fail "E2E_GO_MIRROR is for Go"
-      prepare_ddtest_mirror
+      prepare_release_mirror
       export INTAKE_MIRROR_AUTHORIZATION="Bearer e2e-mirror-token"
       start_intake
       export DD_SET_TRACER_REPOSITORY_URL_GO="$intake_url/mirror"
       export DD_SET_AUTH_HEADER_GO="Authorization: $INTAKE_MIRROR_AUTHORIZATION"
+    fi
+    if [ "${E2E_RUST_MIRROR:-}" = "1" ]; then
+      [ "$language" = "rust" ] || fail "E2E_RUST_MIRROR is for Rust"
+      prepare_release_mirror
+      export INTAKE_MIRROR_AUTHORIZATION="Bearer e2e-mirror-token"
+      start_intake
+      export DD_SET_TRACER_REPOSITORY_URL_RUST="$intake_url/mirror"
+      export DD_SET_AUTH_HEADER_RUST="Authorization: $INTAKE_MIRROR_AUTHORIZATION"
     fi
     for run in $(seq 1 "$runs"); do
       # The second run starts with the first one's output exported: for Go,
@@ -551,7 +694,11 @@ case "$mode" in
     run_tests
     ;;
   skipped)
-    [ "$language" = "go" ] || fail "skipped runs Go with a toolchain older than 1.25"
+    if [ "$language" = "rust" ]; then
+      run_rust_skipped
+      exit 0
+    fi
+    [ "$language" = "go" ] || fail "skipped runs Go with a toolchain older than 1.25, or Rust"
     new_project
     unset GITHUB_ACTION GITHUB_PATH GITHUB_ENV
     status=0
